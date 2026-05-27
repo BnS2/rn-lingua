@@ -33,9 +33,12 @@
 		"tailwindcss": "^4.3.0"
 	},
 	"devDependencies": {
+		"@biomejs/biome": "^2.4.15",
 		"@types/react": "~19.2.2",
 		"eslint": "^9.0.0",
 		"eslint-config-expo": "~56.0.4",
+		"lint-staged": "^17.0.5",
+		"simple-git-hooks": "^2.13.1",
 		"typescript": "~6.0.3"
 	},
 	"scripts": {
@@ -44,7 +47,17 @@
 		"ios": "expo start --ios",
 		"web": "expo start --web",
 		"lint": "expo lint",
-		"typecheck": "tsc --noEmit"
+		"format": "biome format --write",
+		"typecheck": "tsc --noEmit",
+		"postinstall": "simple-git-hooks"
+	},
+	"simple-git-hooks": {
+		"pre-commit": "npx lint-staged"
+	},
+	"lint-staged": {
+		"*.{ts,tsx,js,json,css,mjs}": [
+			"biome check --linter-enabled=false --write"
+		]
 	},
 	"overrides": {
 		"lightningcss": "1.30.1"
