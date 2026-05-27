@@ -1,9 +1,95 @@
-:root {
-  --font-display:
-    Spline Sans, Inter, ui-sans-serif, system-ui, sans-serif, Apple Color Emoji, Segoe UI Emoji,
-    Segoe UI Symbol, Noto Color Emoji;
-  --font-mono:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace;
-  --font-rounded: 'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif;
-  --font-serif: Georgia, 'Times New Roman', serif;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+
+@import "nativewind/theme";
+
+@theme {
+  --color-lingua-purple: #6C4EF5;
+  --color-lingua-deep-purple: #5B3BF6;
+  --color-lingua-blue: #4D8BFF;
+  --color-lingua-green: #21C16B;
+
+  --color-success: #21C16B;
+  --color-warning: #FFC800;
+  --color-streak: #FF8A00;
+  --color-error: #FF4D4D;
+  --color-info: #4D8BFF;
+
+  --color-neutral-primary: #0D132B;
+  --color-neutral-secondary: #6B7280;
+  --color-neutral-border: #E5E7EB;
+  --color-neutral-surface: #F6F7FB;
+  --color-neutral-background: #FFFFFF;
+
+  --font-poppins-bold: Poppins-Bold;
+  --font-poppins-semibold: Poppins-SemiBold;
+  --font-poppins-medium: Poppins-Medium;
+  --font-poppins-regular: Poppins-Regular;
+}
+
+@utility text-h1 {
+  font-family: Poppins-Bold;
+  font-size: 32px;
+  line-height: 38.4px;
+}
+
+@utility text-h2 {
+  font-family: Poppins-SemiBold;
+  font-size: 24px;
+  line-height: 31.2px;
+}
+
+@utility text-h3 {
+  font-family: Poppins-SemiBold;
+  font-size: 20px;
+  line-height: 26px;
+}
+
+@utility text-h4 {
+  font-family: Poppins-Medium;
+  font-size: 16px;
+  line-height: 22.4px;
+}
+
+@utility text-body-large {
+  font-family: Poppins-Regular;
+  font-size: 16px;
+  line-height: 25.6px;
+}
+
+@utility text-body-medium {
+  font-family: Poppins-Regular;
+  font-size: 14px;
+  line-height: 22.4px;
+}
+
+@utility text-body-small {
+  font-family: Poppins-Regular;
+  font-size: 13px;
+  line-height: 20.8px;
+}
+
+@utility text-caption {
+  font-family: Poppins-Regular;
+  font-size: 11px;
+  line-height: 15.4px;
+}
+
+@media android {
+  :root {
+    --font-mono: monospace;
+    --font-rounded: normal;
+    --font-serif: serif;
+    --font-sans: normal;
+  }
+}
+
+@media ios {
+  :root {
+    --font-mono: ui-monospace;
+    --font-rounded: ui-rounded;
+    --font-serif: ui-serif;
+    --font-sans: system-ui;
+  }
 }
