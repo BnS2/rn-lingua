@@ -10,65 +10,123 @@ export default function Index() {
 		<SafeAreaView style={{ flex: 1, backgroundColor: "#FFFFFF" }}>
 			<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
-			<View className="flex-1 justify-between px-6 py-8">
-				{/* Top Section - Active Badge */}
-				<View className="items-center">
-					<View className="bg-neutral-surface border border-neutral-border rounded-full px-3 py-1.5 flex-row items-center gap-2">
-						<View className="w-2 h-2 rounded-full bg-lingua-green" />
-						<Text className="text-caption text-neutral-primary font-poppins-semibold uppercase tracking-wider">
-							Design System Active
-						</Text>
-					</View>
-				</View>
-
-				{/* Hero Mascot Section */}
-				<View className="flex-1 justify-center items-center my-8">
+			<View className="flex-1 justify-between px-6 py-6">
+				{/* Top Header Section - Brand Logo & Name */}
+				<View className="flex-row items-center justify-center gap-2 mt-4">
 					<Image
-						source={images.mascotWelcome}
-						style={{ width: 240, height: 240 }}
+						source={images.mascotLogo}
+						style={{ width: 28, height: 28 }}
 						resizeMode="contain"
 					/>
-
-					{/* Brand Logo & Name */}
-					<View className="flex-row items-center justify-center gap-3 mt-6">
-						<Image
-							source={images.mascotLogo}
-							style={{ width: 44, height: 44 }}
-							resizeMode="contain"
-						/>
-						<Text className="text-h1 text-neutral-primary font-poppins-bold tracking-tight">
-							muolingo
-						</Text>
-					</View>
-
-					{/* Tagline */}
-					<Text className="text-body-large text-neutral-secondary text-center mt-4 px-4 font-poppins-regular leading-6">
-						Learn languages playfully with interactive AI teachers and real-time chat tutors.
+					<Text className="text-h3 text-neutral-primary font-poppins-bold tracking-tight">
+						muolingo
 					</Text>
 				</View>
 
-				{/* Bottom CTA Button Area */}
-				<View className="w-full gap-4">
-					{/* Primary Action Button (Playful 3D styling) */}
-					<TouchableOpacity
-						activeOpacity={0.85}
-						className="w-full bg-lingua-purple border-b-4 border-lingua-deep-purple rounded-2xl py-4 items-center justify-center shadow-sm"
-						onPress={() => router.push("/onboarding")}
-					>
-						<Text className="text-white text-center font-poppins-bold text-base tracking-wider">
-							GET STARTED
-						</Text>
-					</TouchableOpacity>
+				{/* Heading & Subtitle Section */}
+				<View className="items-center mt-6">
+					<Text className="text-[34px] font-poppins-bold text-neutral-primary text-center leading-[42px]">
+						Your AI language{"\n"}
+						<Text className="text-lingua-purple">teacher.</Text>
+					</Text>
+					<Text className="text-[15px] font-poppins-regular text-neutral-secondary text-center mt-4 leading-[22px] px-2">
+						Real conversations, personalized{"\n"}lessons, anytime, anywhere.
+					</Text>
+				</View>
 
-					{/* Secondary Action Button (Outline 3D styling) */}
+				{/* Mascot & Playful Speech Bubbles Section */}
+				<View className="items-center justify-center my-6">
+					<View style={{ width: 310, height: 310, justifyContent: "center", alignItems: "center" }}>
+						{/* Mascot Fox */}
+						<Image
+							source={images.mascotWelcome}
+							style={{ width: 230, height: 230 }}
+							resizeMode="contain"
+						/>
+
+						{/* Bubble 1: "Hello!" (Top-Left, Light Blue) */}
+						<View className="absolute top-4 left-0 bg-[#E5F0FF] rounded-2xl px-5 py-2.5 z-10">
+							<Text className="text-[#0D132B] font-poppins-semibold text-[15px] tracking-wide">
+								Hello!
+							</Text>
+							{/* Tail pointing down-right towards the mascot */}
+							<View
+								style={{
+									position: "absolute",
+									bottom: -5,
+									right: 24,
+									width: 12,
+									height: 12,
+									backgroundColor: "#E5F0FF",
+									transform: [{ rotate: "45deg" }],
+								}}
+							/>
+						</View>
+
+						{/* Bubble 2: "¡Hola!" (Top-Right, Light Purple) */}
+						<View className="absolute top-0 right-0 bg-[#EEECFF] rounded-2xl px-5 py-2.5 z-10">
+							<Text className="text-[#6C4EF5] font-poppins-semibold text-[15px] tracking-wide">
+								¡Hola!
+							</Text>
+							{/* Tail pointing down-left towards the mascot */}
+							<View
+								style={{
+									position: "absolute",
+									bottom: -5,
+									left: 24,
+									width: 12,
+									height: 12,
+									backgroundColor: "#EEECFF",
+									transform: [{ rotate: "45deg" }],
+								}}
+							/>
+						</View>
+
+						{/* Bubble 3: "你好!" (Middle-Right, Light Peach) */}
+						<View className="absolute bottom-16 right-[-8] bg-[#FFEFEA] rounded-2xl px-5 py-2.5 z-10">
+							<Text className="text-[#FF4D4D] font-poppins-semibold text-[15px] tracking-wide">
+								你好!
+							</Text>
+							{/* Tail pointing left towards the mascot */}
+							<View
+								style={{
+									position: "absolute",
+									left: -5,
+									top: "40%",
+									width: 12,
+									height: 12,
+									backgroundColor: "#FFEFEA",
+									transform: [{ rotate: "45deg" }],
+								}}
+							/>
+						</View>
+					</View>
+				</View>
+
+				{/* Bottom CTA Button Area (Without pagination dots) */}
+				<View className="w-full px-2 mb-4">
 					<TouchableOpacity
 						activeOpacity={0.85}
-						className="w-full bg-white border-2 border-b-4 border-neutral-border rounded-2xl py-4 items-center justify-center"
-						onPress={() => console.log("Login pressed")}
+						className="w-full bg-lingua-purple rounded-3xl py-4 flex-row items-center justify-center relative shadow-sm"
+						onPress={() => router.push("/signup")}
 					>
-						<Text className="text-lingua-purple text-center font-poppins-bold text-base tracking-wider">
-							I ALREADY HAVE AN ACCOUNT
+						<Text className="text-white text-center font-poppins-bold text-[17px] tracking-wide">
+							Get Started
 						</Text>
+
+						{/* Absolute right-aligned Chevron icon */}
+						<View className="absolute right-6 top-0 bottom-0 justify-center items-center">
+							<View
+								style={{
+									width: 8,
+									height: 8,
+									borderTopWidth: 2,
+									borderRightWidth: 2,
+									borderColor: "#FFFFFF",
+									transform: [{ rotate: "45deg" }],
+								}}
+							/>
+						</View>
 					</TouchableOpacity>
 				</View>
 			</View>
