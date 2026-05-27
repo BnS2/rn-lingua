@@ -43,5 +43,9 @@ example
 /android
 
 
-# prompt material
+# prompt
 prompt_material/
+prompts/
+
+# antigravity
+.antigravitycli/
