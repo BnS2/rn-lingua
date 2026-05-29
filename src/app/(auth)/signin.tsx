@@ -107,18 +107,7 @@ export default function SignIn() {
 				return;
 			}
 
-			// Case 2: New user — Google identity is "transferable" to a new sign-up.
-			// This happens when no existing Clerk account matches the Google email.
-			if (ssoSignIn?.firstFactorVerification?.status === "transferable" && ssoSignUp) {
-				await ssoSignUp.create({ transfer: true });
-				if (ssoSignUp.createdSessionId && setSSOActive) {
-					await setSSOActive({ session: ssoSignUp.createdSessionId });
-					router.replace("/");
-					return;
-				}
-			}
-
-			// Case 3: Existing user whose session is on signIn or signUp object
+			// startSSOFlow handles transferable OAuth sign-ups internally.
 			const sessionId = ssoSignIn?.createdSessionId ?? ssoSignUp?.createdSessionId;
 			if (sessionId && setSSOActive) {
 				await setSSOActive({ session: sessionId });
