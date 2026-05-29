@@ -1,6 +1,6 @@
 import { useAuth, useClerk, useUser } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
-import { Redirect } from "expo-router";
+import { Link, Redirect } from "expo-router";
 import {
 	ActivityIndicator,
 	Image,
@@ -108,6 +108,18 @@ export default function Index() {
 
 				{/* Primary & Sign Out Actions */}
 				<View className="w-full gap-4 mb-4">
+					<Link href="/language-selection" asChild>
+						<TouchableOpacity
+							activeOpacity={0.85}
+							className="w-full flex-row items-center justify-center gap-2 rounded-2xl border border-b-4 border-[#D9D4FF] bg-[#F3F0FF] py-3.5"
+						>
+							<Ionicons name="earth" size={18} color="#6C4EF5" />
+							<Text className="text-center font-poppins-bold text-[14px] uppercase tracking-wide text-lingua-purple">
+								Choose Language
+							</Text>
+						</TouchableOpacity>
+					</Link>
+
 					{/* Start AI Lesson CTA */}
 					<TouchableOpacity
 						activeOpacity={0.85}
