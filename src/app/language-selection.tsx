@@ -28,8 +28,9 @@ export default function LanguageSelection() {
 	const router = useRouter();
 	const { width } = useWindowDimensions();
 	const { selectedLanguageCode: savedLanguageCode, setSelectedLanguage } = useLanguageStore();
-	const [selectedLanguageCode, setSelectedLanguageCode] = useState<LanguageCode>(savedLanguageCode);
+	const [selectedLanguageCode, setSelectedLanguageCode] = useState<LanguageCode | null>(null);
 	const [searchQuery, setSearchQuery] = useState("");
+	const activeLanguageCode = selectedLanguageCode ?? savedLanguageCode ?? "es";
 
 	const filteredLanguages = useMemo(() => {
 		const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -56,7 +57,7 @@ export default function LanguageSelection() {
 	};
 
 	const handleConfirm = () => {
-		setSelectedLanguage(selectedLanguageCode);
+		setSelectedLanguage(activeLanguageCode);
 		navigateBackOrHome();
 	};
 
@@ -100,7 +101,7 @@ export default function LanguageSelection() {
 
 					<View className="gap-0">
 						{filteredLanguages.map((language) => {
-							const isSelected = language.code === selectedLanguageCode;
+							const isSelected = language.code === activeLanguageCode;
 
 							return (
 								<TouchableOpacity
