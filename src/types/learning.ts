@@ -15,7 +15,7 @@ export type SupportedLanguage = {
 	code: LanguageCode;
 	name: string;
 	nativeName: string;
-	flagEmoji: string;
+	flagUrl: string;
 	accentColor: string;
 	description: string;
 };

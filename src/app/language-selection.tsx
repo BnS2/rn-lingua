@@ -15,6 +15,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { images } from "@/constants/images";
 import { languages } from "@/data/languages";
+import { useLanguageStore } from "@/store/languageStore";
 import type { LanguageCode } from "@/types/learning";
 
 const learnerCounts: Record<LanguageCode, string> = {
@@ -26,7 +27,8 @@ const learnerCounts: Record<LanguageCode, string> = {
 export default function LanguageSelection() {
 	const router = useRouter();
 	const { width } = useWindowDimensions();
-	const [selectedLanguageCode, setSelectedLanguageCode] = useState<LanguageCode>(languages[0].code);
+	const { selectedLanguageCode: savedLanguageCode, setSelectedLanguage } = useLanguageStore();
+	const [selectedLanguageCode, setSelectedLanguageCode] = useState<LanguageCode>(savedLanguageCode);
 	const [searchQuery, setSearchQuery] = useState("");
 
 	const filteredLanguages = useMemo(() => {
@@ -44,13 +46,18 @@ export default function LanguageSelection() {
 		});
 	}, [searchQuery]);
 
-	const handleConfirm = () => {
+	const navigateBackOrHome = () => {
 		if (router.canGoBack()) {
 			router.back();
 			return;
 		}
 
 		router.replace("/");
+	};
+
+	const handleConfirm = () => {
+		setSelectedLanguage(selectedLanguageCode);
+		navigateBackOrHome();
 	};
 
 	return (
@@ -61,7 +68,7 @@ export default function LanguageSelection() {
 				<TouchableOpacity
 					activeOpacity={0.75}
 					className="absolute left-6 top-2 h-11 w-11 items-start justify-center"
-					onPress={() => router.back()}
+					onPress={navigateBackOrHome}
 				>
 					<Ionicons name="chevron-back" size={32} color="#0D132B" />
 				</TouchableOpacity>
@@ -108,7 +115,7 @@ export default function LanguageSelection() {
 								>
 									<View className="h-12 w-12 items-center justify-center overflow-hidden rounded-full border border-[#EEF0F5] bg-white">
 										<Image
-											source={{ uri: language.flagEmoji }}
+											source={{ uri: language.flagUrl }}
 											style={styles.flag}
 											resizeMode="cover"
 										/>
