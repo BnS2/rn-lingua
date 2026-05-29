@@ -1,7 +1,12 @@
+import { useAuth, useSSO } from "@clerk/expo";
+import { useSignUp } from "@clerk/expo/legacy";
 import { AntDesign, FontAwesome, Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
-import React, { useState } from "react";
+import * as Linking from "expo-linking";
+import { Redirect, useRouter } from "expo-router";
+import * as WebBrowser from "expo-web-browser";
+import React, { useEffect, useState } from "react";
 import {
+	ActivityIndicator,
 	Image,
 	KeyboardAvoidingView,
 	Platform,
@@ -17,8 +22,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import VerificationModal from "@/components/VerificationModal";
 import { images } from "@/constants/images";
 
+type SSOStrategy = "oauth_google" | "oauth_facebook" | "oauth_apple";
+
 export default function SignUp() {
 	const router = useRouter();
+
+	const { signUp, setActive, isLoaded } = useSignUp();
+	const { startSSOFlow } = useSSO();
+	const { isLoaded: isAuthLoaded, isSignedIn } = useAuth();
 
 	// Input and UI States
 	const [email, setEmail] = useState("");
@@ -27,21 +38,151 @@ export default function SignUp() {
 	const [isEmailFocused, setIsEmailFocused] = useState(false);
 	const [isPasswordFocused, setIsPasswordFocused] = useState(false);
 	const [isModalVisible, setIsModalVisible] = useState(false);
+	const [isSSOLoading, setIsSSOLoading] = useState(false);
+	const [formError, setFormError] = useState("");
 
-	const handleSignUp = () => {
-		// Open verification modal when Sign Up is pressed
-		if (email.trim()) {
+	// Warm up the browser on mount for faster OAuth open (especially Android)
+	useEffect(() => {
+		void WebBrowser.warmUpAsync();
+		return () => {
+			void WebBrowser.coolDownAsync();
+		};
+	}, []);
+
+	const handleSignUp = async () => {
+		if (!isLoaded) return;
+		setFormError("");
+		if (!email.trim() || !password.trim()) {
+			setFormError("Please enter both a valid email and password.");
+			return;
+		}
+
+		try {
+			await signUp.create({
+				emailAddress: email,
+				password,
+			});
+
+			await signUp.prepareEmailAddressVerification({
+				strategy: "email_code",
+			});
+
 			setIsModalVisible(true);
-		} else {
-			alert("Please enter a valid email address");
+		} catch (err: any) {
+			console.error("SignUp error:", err);
+			const clerkError =
+				err?.errors?.[0]?.longMessage || err?.message || "Sign up failed. Please try again.";
+			setFormError(clerkError);
 		}
 	};
 
-	const handleVerifySuccess = () => {
-		setIsModalVisible(false);
-		// Automatically navigate to the home route (/)
-		router.replace("/");
+	const handleVerify = async (code: string): Promise<boolean> => {
+		if (!isLoaded) return false;
+
+		const completeSignUp = await signUp.attemptEmailAddressVerification({
+			code,
+		});
+
+		if (completeSignUp.status === "complete") {
+			if (setActive) {
+				await setActive({ session: completeSignUp.createdSessionId });
+			}
+			setIsModalVisible(false);
+			router.replace("/");
+			return true;
+		} else {
+			console.error("Verification not complete:", completeSignUp);
+			throw new Error("Verification attempt not complete. Please check the code.");
+		}
 	};
+
+	const handleResendCode = async () => {
+		if (!isLoaded) return;
+		await signUp.prepareEmailAddressVerification({
+			strategy: "email_code",
+		});
+	};
+
+	const handleSSO = async (strategy: SSOStrategy) => {
+		if (isSSOLoading) return;
+
+		setIsSSOLoading(true);
+
+		try {
+			const redirectUrl = Linking.createURL("/oauth-callback");
+			const {
+				createdSessionId,
+				setActive: setSSOActive,
+				signIn: ssoSignIn,
+				signUp: ssoSignUp,
+			} = await startSSOFlow({
+				strategy,
+				redirectUrl,
+			});
+
+			// Case 1: Session already created (returning user, direct sign-in)
+			if (createdSessionId && setSSOActive) {
+				await setSSOActive({ session: createdSessionId });
+				router.replace("/");
+				return;
+			}
+
+			// Case 2: New user — the Google identity needs to be transferred to a new sign-up.
+			// Clerk signals this in two ways:
+			//   a) firstFactorVerification.status === "transferable"  (returning SSO user linking)
+			//   b) signIn.status === "needs_identifier" (brand-new Google account, no Clerk record yet)
+			// In both cases, calling ssoSignUp.create({ transfer: true }) creates the account.
+			const isTransferable = ssoSignIn?.firstFactorVerification?.status === "transferable";
+			const isNewUser = ssoSignIn?.status === "needs_identifier";
+			if ((isTransferable || isNewUser) && ssoSignUp) {
+				await ssoSignUp.create({ transfer: true });
+				if (ssoSignUp.createdSessionId && setSSOActive) {
+					await setSSOActive({ session: ssoSignUp.createdSessionId });
+					router.replace("/");
+					return;
+				}
+			}
+
+			// Case 3: Existing user whose session is on signIn or signUp object
+			const sessionId = ssoSignIn?.createdSessionId ?? ssoSignUp?.createdSessionId;
+			if (sessionId && setSSOActive) {
+				await setSSOActive({ session: sessionId });
+				router.replace("/");
+				return;
+			}
+
+			// Cancelled or dismissed — do nothing
+			if (!ssoSignIn && !ssoSignUp) return;
+
+			console.warn("SSO completed but no session created", {
+				signInStatus: ssoSignIn?.status,
+				signUpStatus: ssoSignUp?.status,
+				transferStatus: ssoSignIn?.firstFactorVerification?.status,
+			});
+			alert("We couldn't finish signing up. Please try again.");
+		} catch (err: any) {
+			console.error("SSO failed:", err);
+			const clerkError = err?.errors?.[0]?.longMessage || err?.message || "OAuth login failed";
+			alert(clerkError);
+		} finally {
+			setIsSSOLoading(false);
+		}
+	};
+
+	if (!isAuthLoaded) {
+		return (
+			<SafeAreaView style={styles.safeArea}>
+				<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+				<View className="flex-1 items-center justify-center">
+					<ActivityIndicator size="large" color="#6C4EF5" />
+				</View>
+			</SafeAreaView>
+		);
+	}
+
+	if (isSignedIn) {
+		return <Redirect href="/" />;
+	}
 
 	return (
 		<SafeAreaView style={styles.safeArea}>
@@ -115,7 +256,10 @@ export default function SignUp() {
 							</Text>
 							<TextInput
 								value={email}
-								onChangeText={setEmail}
+								onChangeText={(value) => {
+									setEmail(value);
+									if (formError) setFormError("");
+								}}
 								placeholder="alex@gmail.com"
 								placeholderTextColor="#9CA3AF"
 								keyboardType="email-address"
@@ -130,7 +274,11 @@ export default function SignUp() {
 						{/* Password Field Block */}
 						<View
 							className={`w-full bg-white border-2 rounded-2xl px-4 py-2.5 flex-row items-center justify-between ${
-								isPasswordFocused ? "border-lingua-purple" : "border-neutral-border"
+								formError
+									? "border-error"
+									: isPasswordFocused
+										? "border-lingua-purple"
+										: "border-neutral-border"
 							}`}
 						>
 							<View className="flex-1">
@@ -139,7 +287,10 @@ export default function SignUp() {
 								</Text>
 								<TextInput
 									value={password}
-									onChangeText={setPassword}
+									onChangeText={(value) => {
+										setPassword(value);
+										if (formError) setFormError("");
+									}}
 									placeholder="•••••••••"
 									placeholderTextColor="#9CA3AF"
 									secureTextEntry={!showPassword}
@@ -158,6 +309,15 @@ export default function SignUp() {
 								<Ionicons name={showPassword ? "eye" : "eye-off"} size={20} color="#6B7280" />
 							</TouchableOpacity>
 						</View>
+
+						{formError ? (
+							<View className="-mt-2 flex-row items-start gap-1.5 px-1">
+								<Ionicons name="alert-circle" size={16} color="#FF4D4D" />
+								<Text className="flex-1 text-[12px] leading-[18px] font-poppins-semibold text-error">
+									{formError}
+								</Text>
+							</View>
+						) : null}
 					</View>
 
 					{/* Primary Sign Up Button (Tactile style matching Duolingo) */}
@@ -185,7 +345,11 @@ export default function SignUp() {
 						{/* Google Login */}
 						<TouchableOpacity
 							activeOpacity={0.8}
-							className="w-full bg-white border-2 border-b-4 border-neutral-border rounded-2xl py-3.5 flex-row items-center px-5 relative"
+							disabled={isSSOLoading}
+							onPress={() => handleSSO("oauth_google")}
+							className={`w-full bg-white border-2 border-b-4 border-neutral-border rounded-2xl py-3.5 flex-row items-center px-5 relative ${
+								isSSOLoading ? "opacity-60" : ""
+							}`}
 						>
 							<View className="absolute left-5 justify-center">
 								<AntDesign name="google" size={18} color="#EA4335" />
@@ -198,7 +362,11 @@ export default function SignUp() {
 						{/* Facebook Login */}
 						<TouchableOpacity
 							activeOpacity={0.8}
-							className="w-full bg-white border-2 border-b-4 border-neutral-border rounded-2xl py-3.5 flex-row items-center px-5 relative"
+							disabled={isSSOLoading}
+							onPress={() => handleSSO("oauth_facebook")}
+							className={`w-full bg-white border-2 border-b-4 border-neutral-border rounded-2xl py-3.5 flex-row items-center px-5 relative ${
+								isSSOLoading ? "opacity-60" : ""
+							}`}
 						>
 							<View className="absolute left-5 justify-center">
 								<FontAwesome name="facebook" size={18} color="#1877F2" />
@@ -211,7 +379,11 @@ export default function SignUp() {
 						{/* Apple Login */}
 						<TouchableOpacity
 							activeOpacity={0.8}
-							className="w-full bg-white border-2 border-b-4 border-neutral-border rounded-2xl py-3.5 flex-row items-center px-5 relative"
+							disabled={isSSOLoading}
+							onPress={() => handleSSO("oauth_apple")}
+							className={`w-full bg-white border-2 border-b-4 border-neutral-border rounded-2xl py-3.5 flex-row items-center px-5 relative ${
+								isSSOLoading ? "opacity-60" : ""
+							}`}
 						>
 							<View className="absolute left-5 justify-center">
 								<FontAwesome name="apple" size={18} color="#000000" />
@@ -238,8 +410,9 @@ export default function SignUp() {
 			<VerificationModal
 				visible={isModalVisible}
 				onClose={() => setIsModalVisible(false)}
-				onVerifySuccess={handleVerifySuccess}
 				email={email}
+				onVerify={handleVerify}
+				onResend={handleResendCode}
 			/>
 		</SafeAreaView>
 	);
