@@ -38,6 +38,7 @@ export default function SignUp() {
 	const [isEmailFocused, setIsEmailFocused] = useState(false);
 	const [isPasswordFocused, setIsPasswordFocused] = useState(false);
 	const [isModalVisible, setIsModalVisible] = useState(false);
+	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [isSSOLoading, setIsSSOLoading] = useState(false);
 	const [formError, setFormError] = useState("");
 
@@ -51,12 +52,14 @@ export default function SignUp() {
 
 	const handleSignUp = async () => {
 		if (!isLoaded) return;
+		if (isSubmitting) return;
 		setFormError("");
 		if (!email.trim() || !password.trim()) {
 			setFormError("Please enter both a valid email and password.");
 			return;
 		}
 
+		setIsSubmitting(true);
 		try {
 			await signUp.create({
 				emailAddress: email,
@@ -73,6 +76,8 @@ export default function SignUp() {
 			const clerkError =
 				err?.errors?.[0]?.longMessage || err?.message || "Sign up failed. Please try again.";
 			setFormError(clerkError);
+		} finally {
+			setIsSubmitting(false);
 		}
 	};
 
@@ -324,6 +329,7 @@ export default function SignUp() {
 					<TouchableOpacity
 						activeOpacity={0.85}
 						className="w-full bg-lingua-purple border-b-4 border-lingua-deep-purple rounded-2xl py-4 mt-6 items-center justify-center shadow-sm"
+						disabled={isSubmitting || isSSOLoading}
 						onPress={handleSignUp}
 					>
 						<Text className="text-white text-center font-poppins-bold text-[16px] tracking-wider uppercase">

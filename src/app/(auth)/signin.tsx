@@ -36,6 +36,7 @@ export default function SignIn() {
 	const [showPassword, setShowPassword] = useState(false);
 	const [isEmailFocused, setIsEmailFocused] = useState(false);
 	const [isPasswordFocused, setIsPasswordFocused] = useState(false);
+	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [isSSOLoading, setIsSSOLoading] = useState(false);
 	const [formError, setFormError] = useState("");
 
@@ -49,12 +50,14 @@ export default function SignIn() {
 
 	const handleSignIn = async () => {
 		if (!isLoaded) return;
+		if (isSubmitting) return;
 		setFormError("");
 		if (!email.trim() || !password.trim()) {
 			setFormError("Please enter both your email and password.");
 			return;
 		}
 
+		setIsSubmitting(true);
 		try {
 			const completeSignIn = await signIn.create({
 				identifier: email,
@@ -75,6 +78,8 @@ export default function SignIn() {
 			const clerkError =
 				err?.errors?.[0]?.longMessage || err?.message || "Sign in failed. Please try again.";
 			setFormError(clerkError);
+		} finally {
+			setIsSubmitting(false);
 		}
 	};
 
@@ -294,6 +299,7 @@ export default function SignIn() {
 					<TouchableOpacity
 						activeOpacity={0.85}
 						className="w-full bg-lingua-purple border-b-4 border-lingua-deep-purple rounded-2xl py-4 mt-6 items-center justify-center shadow-sm"
+						disabled={isSubmitting}
 						onPress={handleSignIn}
 					>
 						<Text className="text-white text-center font-poppins-bold text-[16px] tracking-wider uppercase">

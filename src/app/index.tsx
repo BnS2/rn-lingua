@@ -30,7 +30,7 @@ export default function Index() {
 
 	// Redirection logic if not authenticated
 	if (!isSignedIn) {
-		return <Redirect href={"/onboarding" as any} />;
+		return <Redirect href="/onboarding" />;
 	}
 
 	const userEmail = user?.emailAddresses[0]?.emailAddress || "Learner";
