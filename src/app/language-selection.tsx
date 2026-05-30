@@ -1,3 +1,4 @@
+import { useAuth } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useMemo, useState } from "react";
@@ -26,6 +27,7 @@ const learnerCounts: Record<LanguageCode, string> = {
 
 export default function LanguageSelection() {
 	const router = useRouter();
+	const { userId } = useAuth();
 	const { width } = useWindowDimensions();
 	const {
 		hasHydrated,
@@ -67,8 +69,18 @@ export default function LanguageSelection() {
 			return;
 		}
 
-		setSelectedLanguage(activeLanguageCode);
-		navigateBackOrHome();
+		if (!userId) {
+			router.replace("/");
+			return;
+		}
+
+		setSelectedLanguage(activeLanguageCode, userId);
+		if (router.canGoBack()) {
+			router.back();
+			return;
+		}
+
+		router.replace("/(tabs)/home");
 	};
 
 	return (
