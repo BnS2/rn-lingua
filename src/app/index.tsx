@@ -43,8 +43,12 @@ export default function Index() {
 	const userEmail = user?.emailAddresses[0]?.emailAddress || "Learner";
 
 	const handleClearAsyncStorage = async () => {
-		await AsyncStorage.clear();
-		clearSelectedLanguage();
+		try {
+			await AsyncStorage.removeItem("language-storage");
+			clearSelectedLanguage();
+		} catch (error) {
+			console.error("Failed to clear selected language storage", error);
+		}
 	};
 
 	return (
