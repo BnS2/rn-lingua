@@ -1,33 +1,39 @@
-import { useSyncExternalStore } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { LanguageCode } from "@/types/learning";
 
-let selectedLanguageCode: LanguageCode = "es";
-const listeners = new Set<() => void>();
-
-const subscribe = (listener: () => void) => {
-	listeners.add(listener);
-
-	return () => {
-		listeners.delete(listener);
-	};
+type LanguageState = {
+	hasHydrated: boolean;
+	selectedLanguageCode: LanguageCode | null;
+	setHasHydrated: (hasHydrated: boolean) => void;
+	setSelectedLanguage: (languageCode: LanguageCode) => void;
+	clearSelectedLanguage: () => void;
 };
 
-const getSelectedLanguageCode = () => selectedLanguageCode;
+export const useLanguageStore = create<LanguageState>()(
+	persist(
+		(set) => ({
+			hasHydrated: false,
+			selectedLanguageCode: null,
+			setHasHydrated: (hasHydrated) => set({ hasHydrated }),
+			setSelectedLanguage: (languageCode) => set({ selectedLanguageCode: languageCode }),
+			clearSelectedLanguage: () => set({ selectedLanguageCode: null }),
+		}),
+		{
+			name: "language-storage",
+			partialize: (state) => ({
+				selectedLanguageCode: state.selectedLanguageCode,
+			}),
+			onRehydrateStorage: () => (state, error) => {
+				if (state && !error) {
+					state.setHasHydrated(true);
+					return;
+				}
 
-const setSelectedLanguage = (languageCode: LanguageCode) => {
-	selectedLanguageCode = languageCode;
-	listeners.forEach((listener) => listener());
-};
-
-export const useLanguageStore = () => {
-	const currentSelectedLanguageCode = useSyncExternalStore(
-		subscribe,
-		getSelectedLanguageCode,
-		getSelectedLanguageCode,
-	);
-
-	return {
-		selectedLanguageCode: currentSelectedLanguageCode,
-		setSelectedLanguage,
-	};
-};
+				useLanguageStore.getState().setHasHydrated(true);
+			},
+			storage: createJSONStorage(() => AsyncStorage),
+		},
+	),
+);

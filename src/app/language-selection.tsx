@@ -27,9 +27,16 @@ const learnerCounts: Record<LanguageCode, string> = {
 export default function LanguageSelection() {
 	const router = useRouter();
 	const { width } = useWindowDimensions();
-	const { selectedLanguageCode: savedLanguageCode, setSelectedLanguage } = useLanguageStore();
-	const [selectedLanguageCode, setSelectedLanguageCode] = useState<LanguageCode>(savedLanguageCode);
+	const {
+		hasHydrated,
+		selectedLanguageCode: savedLanguageCode,
+		setSelectedLanguage,
+	} = useLanguageStore();
+	const [selectedLanguageCode, setSelectedLanguageCode] = useState<LanguageCode | null>(null);
 	const [searchQuery, setSearchQuery] = useState("");
+	const activeLanguageCode = hasHydrated
+		? (selectedLanguageCode ?? savedLanguageCode ?? "es")
+		: null;
 
 	const filteredLanguages = useMemo(() => {
 		const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -56,7 +63,11 @@ export default function LanguageSelection() {
 	};
 
 	const handleConfirm = () => {
-		setSelectedLanguage(selectedLanguageCode);
+		if (!activeLanguageCode) {
+			return;
+		}
+
+		setSelectedLanguage(activeLanguageCode);
 		navigateBackOrHome();
 	};
 
@@ -100,7 +111,7 @@ export default function LanguageSelection() {
 
 					<View className="gap-0">
 						{filteredLanguages.map((language) => {
-							const isSelected = language.code === selectedLanguageCode;
+							const isSelected = language.code === activeLanguageCode;
 
 							return (
 								<TouchableOpacity
@@ -111,6 +122,7 @@ export default function LanguageSelection() {
 											? "border-2 border-lingua-purple bg-[#F8F6FF]"
 											: "border border-[#F1F2F7]"
 									}`}
+									disabled={!hasHydrated}
 									onPress={() => setSelectedLanguageCode(language.code)}
 								>
 									<View className="h-12 w-12 items-center justify-center overflow-hidden rounded-full border border-[#EEF0F5] bg-white">
@@ -156,7 +168,10 @@ export default function LanguageSelection() {
 
 				<TouchableOpacity
 					activeOpacity={0.86}
-					className="h-[74px] w-full flex-row items-center justify-center gap-3 rounded-[22px] bg-lingua-purple px-6"
+					className={`h-[74px] w-full flex-row items-center justify-center gap-3 rounded-[22px] px-6 ${
+						activeLanguageCode ? "bg-lingua-purple" : "bg-[#C8CBD5]"
+					}`}
+					disabled={!activeLanguageCode}
 					onPress={handleConfirm}
 				>
 					<Ionicons name="arrow-forward-circle-outline" size={25} color="#FFFFFF" />

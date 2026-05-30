@@ -1,5 +1,6 @@
 import { useAuth, useClerk, useUser } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Link, Redirect } from "expo-router";
 import {
 	ActivityIndicator,
@@ -12,14 +13,16 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { images } from "@/constants/images";
+import { useLanguageStore } from "@/store/languageStore";
 
 export default function Index() {
 	const { isLoaded, isSignedIn } = useAuth();
 	const { signOut } = useClerk();
 	const { user } = useUser();
+	const { clearSelectedLanguage, hasHydrated, selectedLanguageCode } = useLanguageStore();
 
 	// Loading state
-	if (!isLoaded) {
+	if (!isLoaded || (isSignedIn && !hasHydrated)) {
 		return (
 			<SafeAreaView style={styles.loadingSafeArea}>
 				<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
@@ -33,7 +36,20 @@ export default function Index() {
 		return <Redirect href="/onboarding" />;
 	}
 
+	if (!selectedLanguageCode) {
+		return <Redirect href="/language-selection" />;
+	}
+
 	const userEmail = user?.emailAddresses[0]?.emailAddress || "Learner";
+
+	const handleClearAsyncStorage = async () => {
+		try {
+			await AsyncStorage.removeItem("language-storage");
+			clearSelectedLanguage();
+		} catch (error) {
+			console.error("Failed to clear selected language storage", error);
+		}
+	};
 
 	return (
 		<SafeAreaView style={styles.safeArea}>
@@ -128,6 +144,17 @@ export default function Index() {
 					>
 						<Text className="text-white text-center font-poppins-bold text-[16px] tracking-wider uppercase">
 							Start AI Lesson
+						</Text>
+					</TouchableOpacity>
+
+					{/* Clear AsyncStorage Button (Testing Only) */}
+					<TouchableOpacity
+						activeOpacity={0.85}
+						className="w-full bg-[#F3F4F6] border border-b-4 border-neutral-border rounded-2xl py-3.5 items-center justify-center"
+						onPress={handleClearAsyncStorage}
+					>
+						<Text className="text-neutral-secondary text-center font-poppins-bold text-[14px] tracking-wide uppercase">
+							Clear Async Storage
 						</Text>
 					</TouchableOpacity>
 
