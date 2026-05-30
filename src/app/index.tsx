@@ -1,14 +1,12 @@
-import { useAuth } from "@clerk/expo";
 import { Redirect } from "expo-router";
 import { ActivityIndicator, StatusBar, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useLanguageStore } from "@/store/languageStore";
+import { useAuthGate } from "@/hooks/useAuthGate";
 
 export default function Index() {
-	const { isLoaded, isSignedIn } = useAuth();
-	const { hasHydrated, selectedLanguageCode } = useLanguageStore();
+	const gate = useAuthGate();
 
-	if (!isLoaded || (isSignedIn && !hasHydrated)) {
+	if (gate.status === "loading") {
 		return (
 			<SafeAreaView style={styles.loadingSafeArea}>
 				<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
@@ -17,12 +15,8 @@ export default function Index() {
 		);
 	}
 
-	if (!isSignedIn) {
-		return <Redirect href="/onboarding" />;
-	}
-
-	if (!selectedLanguageCode) {
-		return <Redirect href="/language-selection" />;
+	if (gate.status === "redirect") {
+		return <Redirect href={gate.href} />;
 	}
 
 	return <Redirect href="/home" />;

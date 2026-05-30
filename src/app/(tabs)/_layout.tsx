@@ -1,16 +1,14 @@
-import { useAuth } from "@clerk/expo";
 import { Redirect } from "expo-router";
 import { Tabs } from "expo-router/js-tabs";
 import { ActivityIndicator, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CustomTabBar } from "@/components/custom-tab-bar";
-import { useLanguageStore } from "@/store/languageStore";
+import { useAuthGate } from "@/hooks/useAuthGate";
 
 export default function TabsLayout() {
-	const { isLoaded, isSignedIn } = useAuth();
-	const { hasHydrated, selectedLanguageCode } = useLanguageStore();
+	const gate = useAuthGate();
 
-	if (!isLoaded || (isSignedIn && !hasHydrated)) {
+	if (gate.status === "loading") {
 		return (
 			<SafeAreaView style={styles.loadingSafeArea}>
 				<ActivityIndicator size="large" color="#6C4EF5" />
@@ -18,12 +16,8 @@ export default function TabsLayout() {
 		);
 	}
 
-	if (!isSignedIn) {
-		return <Redirect href="/onboarding" />;
-	}
-
-	if (!selectedLanguageCode) {
-		return <Redirect href="/language-selection" />;
+	if (gate.status === "redirect") {
+		return <Redirect href={gate.href} />;
 	}
 
 	return (
