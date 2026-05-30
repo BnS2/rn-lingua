@@ -71,11 +71,11 @@ export default function HomeScreen() {
 						{language ? (
 							<Image
 								source={{ uri: language.flagUrl }}
-								style={styles.flagIcon}
+								className="w-[38px] h-[38px] rounded-full border-2 border-neutral-border"
 								contentFit="cover"
 							/>
 						) : (
-							<View style={styles.flagPlaceholder}>
+							<View className="w-[38px] h-[38px] rounded-full bg-neutral-surface items-center justify-center">
 								<Ionicons name="earth" size={22} color="#6C4EF5" />
 							</View>
 						)}
@@ -87,7 +87,11 @@ export default function HomeScreen() {
 					{/* Streak + bell */}
 					<View className="flex-row items-center gap-3">
 						<View className="flex-row items-center gap-1">
-							<Image source={images.streakFire} style={styles.streakIcon} contentFit="contain" />
+							<Image
+								source={images.streakFire}
+								className="w-[22px] h-[22px]"
+								contentFit="contain"
+							/>
 							<Text className="font-poppins-bold text-[16px] text-neutral-primary">
 								{streakCount}
 							</Text>
@@ -95,7 +99,7 @@ export default function HomeScreen() {
 						<TouchableOpacity
 							accessibilityLabel="Notifications"
 							accessibilityRole="button"
-							style={styles.bellButton}
+							className="w-[38px] h-[38px] rounded-full bg-neutral-surface items-center justify-center"
 						>
 							<Ionicons name="notifications-outline" size={22} color="#0D132B" />
 						</TouchableOpacity>
@@ -186,7 +190,10 @@ export default function HomeScreen() {
 								style={[index < todaysPlan.length - 1 && styles.planItemBorder]}
 							>
 								{/* Icon */}
-								<View style={[styles.planIconWrapper, { backgroundColor: cfg.bg }]}>
+								<View
+									className="w-[44px] h-[44px] rounded-[14px] items-center justify-center"
+									style={{ backgroundColor: cfg.bg }}
+								>
 									<Ionicons
 										name={cfg.icon as keyof typeof Ionicons.glyphMap}
 										size={20}
@@ -204,11 +211,11 @@ export default function HomeScreen() {
 								</View>
 								{/* Completion indicator */}
 								{item.completed ? (
-									<View style={styles.completedCircle}>
+									<View className="w-[28px] h-[28px] rounded-full bg-lingua-purple items-center justify-center">
 										<Ionicons name="checkmark" size={16} color="#FFFFFF" />
 									</View>
 								) : (
-									<View style={styles.emptyCircle} />
+									<View className="w-[28px] h-[28px] rounded-full border-2 border-gray-300" />
 								)}
 							</View>
 						);
@@ -234,7 +241,8 @@ export default function HomeScreen() {
 						<View className="flex-row items-center gap-3">
 							<Image
 								source={{ uri: nextUpItem.avatarUrl }}
-								style={styles.avatarImage}
+								placeholder={images.mascotLogo}
+								className="w-[56px] h-[56px] rounded-full border-2 border-white"
 								contentFit="cover"
 							/>
 							<TouchableOpacity
@@ -264,33 +272,7 @@ const styles = StyleSheet.create({
 		paddingBottom: 110, // space above custom tab bar
 	},
 	// Header
-	flagIcon: {
-		width: 38,
-		height: 38,
-		borderRadius: 19,
-		borderWidth: 2,
-		borderColor: "#E5E7EB",
-	},
-	flagPlaceholder: {
-		width: 38,
-		height: 38,
-		borderRadius: 19,
-		backgroundColor: "#F6F7FB",
-		alignItems: "center",
-		justifyContent: "center",
-	},
-	streakIcon: {
-		width: 22,
-		height: 22,
-	},
-	bellButton: {
-		width: 38,
-		height: 38,
-		borderRadius: 19,
-		backgroundColor: "#F6F7FB",
-		alignItems: "center",
-		justifyContent: "center",
-	},
+	// (static styles moved to NativeWind className)
 	// Daily goal
 	dailyGoalCard: {
 		flexDirection: "row",
@@ -359,31 +341,9 @@ const styles = StyleSheet.create({
 		marginRight: -8,
 	},
 	// Today's plan
-	planIconWrapper: {
-		width: 44,
-		height: 44,
-		borderRadius: 14,
-		alignItems: "center",
-		justifyContent: "center",
-	},
 	planItemBorder: {
 		borderBottomWidth: 1,
 		borderBottomColor: "#F3F4F6",
-	},
-	completedCircle: {
-		width: 28,
-		height: 28,
-		borderRadius: 14,
-		backgroundColor: "#6C4EF5",
-		alignItems: "center",
-		justifyContent: "center",
-	},
-	emptyCircle: {
-		width: 28,
-		height: 28,
-		borderRadius: 14,
-		borderWidth: 2,
-		borderColor: "#D1D5DB",
 	},
 	// Next up
 	nextUpCard: {
@@ -397,13 +357,6 @@ const styles = StyleSheet.create({
 		shadowOpacity: 0.05,
 		shadowRadius: 6,
 		elevation: 2,
-	},
-	avatarImage: {
-		width: 56,
-		height: 56,
-		borderRadius: 28,
-		borderWidth: 2,
-		borderColor: "#FFFFFF",
 	},
 	videoCallButton: {
 		width: 44,

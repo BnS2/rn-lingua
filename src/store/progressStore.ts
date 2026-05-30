@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { create } from "zustand";
+import type { StateStorage } from "zustand/middleware";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 type ProgressState = {
@@ -12,6 +13,20 @@ type ProgressState = {
 	addXP: (amount: number) => void;
 	markLessonCompleted: (lessonId: string) => void;
 	resetDailyXP: () => void;
+};
+
+const serverStorage: StateStorage = {
+	getItem: () => null,
+	setItem: () => undefined,
+	removeItem: () => undefined,
+};
+
+const getPersistStorage = () => {
+	if (typeof window === "undefined") {
+		return serverStorage;
+	}
+
+	return AsyncStorage;
 };
 
 export const useProgressStore = create<ProgressState>()(
@@ -50,7 +65,7 @@ export const useProgressStore = create<ProgressState>()(
 				}
 				useProgressStore.getState().setHasHydrated(true);
 			},
-			storage: createJSONStorage(() => AsyncStorage),
+			storage: createJSONStorage(getPersistStorage),
 		},
 	),
 );

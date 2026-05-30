@@ -1,15 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import type { BottomTabBarProps } from "expo-router/js-tabs";
-import { useEffect, useState } from "react";
-import {
-	Animated,
-	Easing,
-	StyleSheet,
-	Text,
-	TouchableOpacity,
-	useWindowDimensions,
-	View,
-} from "react-native";
+import { StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 type TabRouteName = "home" | "learn" | "ai-teacher" | "chat" | "profile";
@@ -17,59 +8,46 @@ type TabRouteName = "home" | "learn" | "ai-teacher" | "chat" | "profile";
 type TabConfig = {
 	label: string;
 	icon: keyof typeof Ionicons.glyphMap;
+	activeIcon: keyof typeof Ionicons.glyphMap;
 };
 
 const ACTIVE_COLOR = "#6C4EF5";
-const INACTIVE_COLOR = "#7B819D";
-const TAB_BAR_HORIZONTAL_INSET = 16;
-const ACTIVE_CIRCLE_SIZE = 54;
+const INACTIVE_COLOR = "#58617E";
+const TAB_BAR_HORIZONTAL_INSET = 0;
 
 const tabs: Record<TabRouteName, TabConfig> = {
 	home: {
 		label: "Home",
-		icon: "home",
+		icon: "home-outline",
+		activeIcon: "home",
 	},
 	learn: {
 		label: "Learn",
 		icon: "book-outline",
+		activeIcon: "book",
 	},
 	"ai-teacher": {
 		label: "AI Teacher",
 		icon: "school-outline",
+		activeIcon: "school-outline",
 	},
 	chat: {
 		label: "Chat",
 		icon: "chatbubble-outline",
+		activeIcon: "chatbubble-outline",
 	},
 	profile: {
 		label: "Profile",
 		icon: "person-outline",
+		activeIcon: "person-outline",
 	},
 };
 
 export function CustomTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
 	const { width } = useWindowDimensions();
 	const insets = useSafeAreaInsets();
-	const [activeIndex] = useState(() => new Animated.Value(state.index));
 	const tabCount = state.routes.length;
 	const tabWidth = (width - TAB_BAR_HORIZONTAL_INSET * 2) / tabCount;
-	const indicatorOffset = (tabWidth - ACTIVE_CIRCLE_SIZE) / 2;
-	const activeRoute = state.routes[state.index];
-	const activeTab = tabs[activeRoute.name as TabRouteName];
-
-	useEffect(() => {
-		Animated.timing(activeIndex, {
-			toValue: state.index,
-			useNativeDriver: true,
-			duration: 220,
-			easing: Easing.out(Easing.cubic),
-		}).start();
-	}, [activeIndex, state.index]);
-
-	const translateX = activeIndex.interpolate({
-		inputRange: state.routes.map((_, index) => index),
-		outputRange: state.routes.map((_, index) => index * tabWidth + indicatorOffset),
-	});
 
 	return (
 		<View
@@ -81,18 +59,6 @@ export function CustomTabBar({ state, descriptors, navigation }: BottomTabBarPro
 			]}
 		>
 			<View style={styles.bar}>
-				<Animated.View
-					pointerEvents="none"
-					style={[
-						styles.activeCircle,
-						{
-							transform: [{ translateX }],
-						},
-					]}
-				>
-					<Ionicons name={activeTab.icon} size={25} color="#FFFFFF" />
-				</Animated.View>
-
 				{state.routes.map((route, index) => {
 					const tab = tabs[route.name as TabRouteName];
 					const options = descriptors[route.key]?.options;
@@ -120,12 +86,12 @@ export function CustomTabBar({ state, descriptors, navigation }: BottomTabBarPro
 							onPress={onPress}
 							style={[styles.tabButton, { width: tabWidth }]}
 						>
-							{!isFocused ? (
-								<>
-									<Ionicons name={tab.icon} size={27} color={INACTIVE_COLOR} />
-									<Text style={styles.label}>{tab.label}</Text>
-								</>
-							) : null}
+							<Ionicons
+								name={isFocused ? tab.activeIcon : tab.icon}
+								size={index === 1 ? 30 : 29}
+								color={isFocused ? ACTIVE_COLOR : INACTIVE_COLOR}
+							/>
+							<Text style={[styles.label, isFocused && styles.activeLabel]}>{tab.label}</Text>
 						</TouchableOpacity>
 					);
 				})}
@@ -140,39 +106,31 @@ const styles = StyleSheet.create({
 		right: 0,
 		bottom: 0,
 		left: 0,
-		backgroundColor: "transparent",
-		paddingHorizontal: TAB_BAR_HORIZONTAL_INSET,
+		backgroundColor: "#FFFFFF",
+		borderTopWidth: 1,
+		borderTopColor: "#F1F2F7",
 	},
 	bar: {
-		height: 86,
+		height: 76,
 		flexDirection: "row",
 		alignItems: "center",
-		borderRadius: 30,
 		backgroundColor: "#FFFFFF",
-		boxShadow: "0 8px 24px rgba(13, 19, 43, 0.10)",
-	},
-	activeCircle: {
-		position: "absolute",
-		top: 12,
-		width: ACTIVE_CIRCLE_SIZE,
-		height: ACTIVE_CIRCLE_SIZE,
-		borderRadius: ACTIVE_CIRCLE_SIZE / 2,
-		alignItems: "center",
-		justifyContent: "center",
-		backgroundColor: ACTIVE_COLOR,
-		boxShadow: "0 8px 16px rgba(108, 78, 245, 0.32)",
 	},
 	tabButton: {
 		height: "100%",
 		alignItems: "center",
 		justifyContent: "center",
-		gap: 4,
-		paddingTop: 8,
+		gap: 3,
+		paddingTop: 6,
 	},
 	label: {
-		fontFamily: "Poppins-SemiBold",
-		fontSize: 12,
-		lineHeight: 16,
+		fontFamily: "Poppins-Medium",
+		fontSize: 13,
+		lineHeight: 17,
 		color: INACTIVE_COLOR,
+	},
+	activeLabel: {
+		fontFamily: "Poppins-Bold",
+		color: ACTIVE_COLOR,
 	},
 });
