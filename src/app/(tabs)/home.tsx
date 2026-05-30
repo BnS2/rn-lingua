@@ -38,6 +38,18 @@ function getGreetingWord(languageCode: string | null): string {
 	}
 }
 
+function getUserDisplayName(user: ReturnType<typeof useUser>["user"]): string {
+	const emailName = user?.primaryEmailAddress?.emailAddress.split("@")[0];
+
+	return (
+		user?.firstName?.trim() ||
+		user?.fullName?.trim() ||
+		user?.username?.trim() ||
+		emailName ||
+		"there"
+	);
+}
+
 // ------------------------------------------------------------------
 // Home screen
 // ------------------------------------------------------------------
@@ -51,7 +63,7 @@ export default function HomeScreen() {
 	const units = selectedLanguageCode ? getUnitsByLanguage(selectedLanguageCode) : [];
 	const currentUnit = units[0];
 
-	const firstName = user?.firstName ?? user?.username ?? "Friend";
+	const displayName = getUserDisplayName(user);
 	const greeting = getGreetingWord(selectedLanguageCode);
 	const xpProgress = Math.min(currentXP / dailyGoalXP, 1);
 
@@ -67,25 +79,29 @@ export default function HomeScreen() {
 				{/* ── Header ─────────────────────────────────────────── */}
 				<View className="flex-row items-center px-5 pb-4 pt-2">
 					{/* Flag + greeting */}
-					<View className="flex-1 flex-row items-center gap-3">
+					<View className="min-w-0 flex-1 flex-row items-center gap-3 pr-3">
 						{language ? (
 							<Image
 								source={{ uri: language.flagUrl }}
-								className="w-[38px] h-[38px] rounded-full border-2 border-neutral-border"
+								className="h-[38px] w-[38px] rounded-full border-2 border-neutral-border"
 								contentFit="cover"
 							/>
 						) : (
-							<View className="w-[38px] h-[38px] rounded-full bg-neutral-surface items-center justify-center">
+							<View className="h-[38px] w-[38px] items-center justify-center rounded-full bg-neutral-surface">
 								<Ionicons name="earth" size={22} color="#6C4EF5" />
 							</View>
 						)}
-						<Text className="font-poppins-bold text-[18px] text-neutral-primary">
-							{greeting}, {firstName}! 👋
+						<Text
+							className="min-w-0 flex-1 font-poppins-bold text-[18px] text-neutral-primary"
+							ellipsizeMode="tail"
+							numberOfLines={1}
+						>
+							{greeting}, {displayName}! 👋
 						</Text>
 					</View>
 
 					{/* Streak + bell */}
-					<View className="flex-row items-center gap-3">
+					<View className="flex-row items-center gap-3 shrink-0">
 						<View className="flex-row items-center gap-1">
 							<Image
 								source={images.streakFire}
