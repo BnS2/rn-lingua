@@ -29,7 +29,11 @@ export default function ProfileScreen() {
 			await signOut();
 			router.replace("/onboarding");
 		} catch (error) {
-			console.error("Sign out failed:", error);
+			if (__DEV__) {
+				console.error("Sign out failed:", error);
+			} else {
+				console.error("Sign out failed");
+			}
 			Alert.alert("Sign out failed", "Please try again.");
 		} finally {
 			setIsSigningOut(false);

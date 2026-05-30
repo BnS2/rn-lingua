@@ -75,6 +75,11 @@ export default function LanguageSelection() {
 		}
 
 		setSelectedLanguage(activeLanguageCode, userId);
+		if (router.canGoBack()) {
+			router.back();
+			return;
+		}
+
 		router.replace("/(tabs)/home");
 	};
 
