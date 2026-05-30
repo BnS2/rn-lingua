@@ -1,10 +1,31 @@
-import { useRouter } from "expo-router";
-import { Image, StatusBar, Text, TouchableOpacity, View } from "react-native";
+import { Redirect, useRouter } from "expo-router";
+import { ActivityIndicator, Image, StatusBar, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { images } from "@/constants/images";
+import { useAuthGate } from "@/hooks/useAuthGate";
 
 export default function Onboarding() {
 	const router = useRouter();
+	const gate = useAuthGate();
+
+	if (gate.status === "loading") {
+		return (
+			<SafeAreaView style={{ flex: 1, backgroundColor: "#FFFFFF" }}>
+				<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+				<View className="flex-1 items-center justify-center">
+					<ActivityIndicator size="large" color="#6C4EF5" />
+				</View>
+			</SafeAreaView>
+		);
+	}
+
+	if (gate.status === "ready") {
+		return <Redirect href="/(tabs)/home" />;
+	}
+
+	if (gate.href === "/language-selection") {
+		return <Redirect href="/language-selection" />;
+	}
 
 	return (
 		<SafeAreaView style={{ flex: 1, backgroundColor: "#FFFFFF" }}>

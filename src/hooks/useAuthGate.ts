@@ -7,8 +7,8 @@ type AuthGateResult =
 	| { status: "ready" };
 
 export function useAuthGate(): AuthGateResult {
-	const { isLoaded, isSignedIn } = useAuth();
-	const { hasHydrated, selectedLanguageCode } = useLanguageStore();
+	const { isLoaded, isSignedIn, userId } = useAuth();
+	const { hasHydrated, selectedLanguageCode, selectedLanguageUserId } = useLanguageStore();
 
 	if (!isLoaded || (isSignedIn && !hasHydrated)) {
 		return { status: "loading" };
@@ -18,7 +18,7 @@ export function useAuthGate(): AuthGateResult {
 		return { status: "redirect", href: "/onboarding" };
 	}
 
-	if (!selectedLanguageCode) {
+	if (!selectedLanguageCode || selectedLanguageUserId !== userId) {
 		return { status: "redirect", href: "/language-selection" };
 	}
 
