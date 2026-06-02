@@ -1,6 +1,4 @@
-type ClerkTokenPayload = {
-	sub?: string;
-};
+import { getSignedInUser } from "@/lib/clerkAuth";
 
 type StopAgentRequest = {
 	callId?: string;
@@ -8,37 +6,20 @@ type StopAgentRequest = {
 };
 
 const agentServerUrl = process.env.VISION_AGENT_SERVER_URL ?? "http://localhost:8000";
+const agentRequestTimeoutMs = Number(process.env.VISION_AGENT_REQUEST_TIMEOUT_MS ?? 8000);
 
 function jsonError(message: string, status: number) {
 	return Response.json({ error: message }, { status });
 }
 
-function decodeJwtPayload(token: string): ClerkTokenPayload | null {
-	const payload = token.split(".")[1];
-
-	if (!payload) {
-		return null;
-	}
-
-	try {
-		const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-		const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-		return JSON.parse(atob(padded)) as ClerkTokenPayload;
-	} catch {
-		return null;
-	}
-}
-
-function isSignedIn(request: Request) {
-	const authorization = request.headers.get("authorization");
-	const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
-	const payload = token ? decodeJwtPayload(token) : null;
-
-	return Boolean(payload?.sub);
+function isAbortError(error: unknown) {
+	return error instanceof DOMException && error.name === "AbortError";
 }
 
 export async function POST(request: Request) {
-	if (!isSignedIn(request)) {
+	const signedInUser = await getSignedInUser(request);
+
+	if (!signedInUser) {
 		return jsonError("Sign in before stopping the AI teacher.", 401);
 	}
 
@@ -54,12 +35,15 @@ export async function POST(request: Request) {
 		return jsonError("Agent session context is required.", 400);
 	}
 
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), agentRequestTimeoutMs);
+
 	try {
 		const response = await fetch(
 			`${agentServerUrl.replace(/\/$/, "")}/calls/${encodeURIComponent(
 				body.callId,
 			)}/sessions/${encodeURIComponent(body.sessionId)}`,
-			{ method: "DELETE" },
+			{ method: "DELETE", signal: controller.signal },
 		);
 
 		if (!response.ok && response.status !== 404) {
@@ -72,7 +56,14 @@ export async function POST(request: Request) {
 
 		return new Response(null, { status: 204 });
 	} catch (error) {
+		if (isAbortError(error)) {
+			console.error("Vision Agent stop timed out:", error);
+			return jsonError("The AI teacher service timed out.", 504);
+		}
+
 		console.error("Vision Agent stop failed:", error);
 		return jsonError("Unable to reach the AI teacher service.", 502);
+	} finally {
+		clearTimeout(timeout);
 	}
 }

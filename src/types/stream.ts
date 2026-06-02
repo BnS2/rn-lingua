@@ -10,7 +10,7 @@ export type StreamAudioCallRequest = {
 	vocabulary: VocabularyItem[];
 	phrases: PhraseItem[];
 	aiTeacherPrompt: string;
-	userName: string;
+	userName?: string;
 	userImage?: string;
 };
 

@@ -149,43 +149,6 @@ export default function AudioLessonScreen() {
 		}
 	}, []);
 
-	const stopVisibleAgentSession = useCallback(async () => {
-		if (!agentSession) {
-			return;
-		}
-
-		try {
-			const clerkToken = await getToken();
-
-			if (!clerkToken) {
-				throw new Error("Missing Clerk session token.");
-			}
-
-			const response = await fetch(getApiUrl("/api/vision-agent/stop"), {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${clerkToken}`,
-				},
-				body: JSON.stringify({
-					callId: agentSession.call_id,
-					sessionId: agentSession.session_id,
-				}),
-			});
-
-			if (!response.ok && response.status !== 204) {
-				throw new Error("Unable to stop the AI teacher.");
-			}
-
-			setAgentSession(null);
-			setAgentStatus("idle");
-			setAgentError(null);
-		} catch (error) {
-			setAgentStatus("failed");
-			setAgentError(error instanceof Error ? error.message : "Unable to stop the AI teacher.");
-		}
-	}, [agentSession, getToken]);
-
 	const cleanupLessonResources = useCallback(async () => {
 		await stopAgentSession();
 
@@ -411,7 +374,9 @@ export default function AudioLessonScreen() {
 			setIsMuted(false);
 			setCallStatus("joined");
 			await startAgentSession(session);
+			didAutoStartCall.current = true;
 		} catch (error) {
+			didAutoStartCall.current = false;
 			setCallStatus("error");
 			setCallError(error instanceof Error ? error.message : "Unable to join the audio lesson.");
 		}
@@ -422,7 +387,6 @@ export default function AudioLessonScreen() {
 			return;
 		}
 
-		didAutoStartCall.current = true;
 		startOrJoinCall();
 	}, [isAuthLoaded, language, lesson, startOrJoinCall, userId]);
 
@@ -441,7 +405,6 @@ export default function AudioLessonScreen() {
 			await activeCall.camera.enable();
 			setIsCameraOn(true);
 		} catch (error) {
-			setCallStatus("error");
 			setCallError(error instanceof Error ? error.message : "Unable to update camera.");
 		}
 	}, [activeCall, isCameraOn, isJoined]);
@@ -461,7 +424,6 @@ export default function AudioLessonScreen() {
 			await activeCall.microphone.disable();
 			setIsMuted(true);
 		} catch (error) {
-			setCallStatus("error");
 			setCallError(error instanceof Error ? error.message : "Unable to update microphone.");
 		}
 	}, [activeCall, isJoined, isMuted]);
@@ -478,7 +440,7 @@ export default function AudioLessonScreen() {
 		}
 
 		try {
-			await stopVisibleAgentSession();
+			await stopAgentSession();
 
 			if (activeCall.state.callingState !== CallingState.LEFT) {
 				await activeCall.leave();
@@ -492,7 +454,7 @@ export default function AudioLessonScreen() {
 			setCallStatus("error");
 			setCallError(error instanceof Error ? error.message : "Unable to end the audio lesson.");
 		}
-	}, [activeCall, router, stopVisibleAgentSession]);
+	}, [activeCall, router, stopAgentSession]);
 
 	if (!lesson) {
 		return (
@@ -727,12 +689,20 @@ export default function AudioLessonScreen() {
 							icon: showSubtitles ? "language" : "text-outline",
 							onPress: toggleSubtitles,
 						})}
-						{renderControl({
-							label: "End Call",
-							icon: "call",
-							variant: "danger",
-							onPress: endCall,
-						})}
+						<View style={styles.controlItem}>
+							<TouchableOpacity
+								accessibilityLabel="End Call"
+								accessibilityRole="button"
+								activeOpacity={0.82}
+								style={[styles.controlCircle, styles.dangerControlCircle]}
+								onPress={endCall}
+							>
+								<Ionicons name="call" size={34} color="#FFFFFF" />
+							</TouchableOpacity>
+							<Text className="font-poppins-bold text-[14px] leading-[18px] text-white">
+								End Call
+							</Text>
+						</View>
 					</View>
 				</View>
 

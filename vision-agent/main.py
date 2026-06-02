@@ -25,8 +25,10 @@ DEFAULT_SELECTED_LANGUAGE = "Spanish"
 
 def load_environment() -> None:
     for env_path in (ROOT_ENV_PATH, SERVICE_ENV_PATH):
+        should_override = env_path == SERVICE_ENV_PATH
+
         for key, value in dotenv_values(env_path).items():
-            if value and not os.getenv(key):
+            if value and (should_override or not os.getenv(key)):
                 os.environ[key] = value
 
     stream_api_key = os.getenv("STREAM_API_KEY") or os.getenv(
@@ -231,6 +233,7 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
             call_type,
             call_id,
         )
+        raise
     finally:
         await agent.close()
 

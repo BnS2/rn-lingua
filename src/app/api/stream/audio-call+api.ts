@@ -1,14 +1,6 @@
 import { StreamClient } from "@stream-io/node-sdk";
+import { getSignedInUser } from "@/lib/clerkAuth";
 import type { StreamAudioCallRequest, StreamAudioCallSession } from "@/types/stream";
-
-type ClerkTokenPayload = {
-	sub?: string;
-	name?: string;
-	given_name?: string;
-	family_name?: string;
-	image_url?: string;
-	picture?: string;
-};
 
 const apiKey = process.env.EXPO_PUBLIC_STREAM_API_KEY;
 const apiSecret = process.env.STREAM_API_SECRET;
@@ -16,40 +8,6 @@ const agentUserId = "ai-language-teacher";
 
 function jsonError(message: string, status: number) {
 	return Response.json({ error: message }, { status });
-}
-
-function decodeJwtPayload(token: string): ClerkTokenPayload | null {
-	const payload = token.split(".")[1];
-
-	if (!payload) {
-		return null;
-	}
-
-	try {
-		const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-		const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-		return JSON.parse(atob(padded)) as ClerkTokenPayload;
-	} catch {
-		return null;
-	}
-}
-
-function getSignedInUser(request: Request) {
-	const authorization = request.headers.get("authorization");
-	const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
-	const payload = token ? decodeJwtPayload(token) : null;
-
-	if (!payload?.sub) {
-		return null;
-	}
-
-	const fallbackName = [payload.given_name, payload.family_name].filter(Boolean).join(" ");
-
-	return {
-		id: payload.sub,
-		name: payload.name ?? fallbackName,
-		image: payload.image_url ?? payload.picture,
-	};
 }
 
 function createCallId(userId: string, lessonId: string, languageCode: string) {
@@ -60,33 +18,63 @@ function createCallId(userId: string, lessonId: string, languageCode: string) {
 	return `lesson-${safeLanguageCode}-${safeLessonId}-${safeUserId}`;
 }
 
+function isString(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasStringFields(value: unknown, fields: string[]) {
+	return isRecord(value) && fields.every((field) => isString(value[field]));
+}
+
+function isValidAudioCallRequest(value: unknown): value is StreamAudioCallRequest {
+	if (!isRecord(value)) {
+		return false;
+	}
+
+	return (
+		isString(value.lessonId) &&
+		isString(value.lessonTitle) &&
+		isString(value.lessonDescription) &&
+		isString(value.languageCode) &&
+		isString(value.languageName) &&
+		isString(value.aiTeacherPrompt) &&
+		Array.isArray(value.goals) &&
+		value.goals.every((goal) => hasStringFields(goal, ["id", "text"])) &&
+		Array.isArray(value.vocabulary) &&
+		value.vocabulary.every((item) =>
+			hasStringFields(item, ["id", "term", "translation", "pronunciation", "partOfSpeech"]),
+		) &&
+		Array.isArray(value.phrases) &&
+		value.phrases.every((phrase) =>
+			hasStringFields(phrase, ["id", "text", "translation", "pronunciation", "context"]),
+		)
+	);
+}
+
 export async function POST(request: Request) {
 	if (!apiKey || !apiSecret) {
 		return jsonError("Stream API key or secret is not configured.", 500);
 	}
 
-	const signedInUser = getSignedInUser(request);
+	const signedInUser = await getSignedInUser(request);
 
 	if (!signedInUser) {
 		return jsonError("Sign in before starting an audio lesson call.", 401);
 	}
 
-	let body: StreamAudioCallRequest;
+	let body: unknown;
 
 	try {
-		body = (await request.json()) as StreamAudioCallRequest;
+		body = await request.json();
 	} catch {
 		return jsonError("Invalid request body.", 400);
 	}
 
-	if (
-		!body.lessonId ||
-		!body.lessonTitle ||
-		!body.lessonDescription ||
-		!body.languageCode ||
-		!body.languageName ||
-		!body.aiTeacherPrompt
-	) {
+	if (!isValidAudioCallRequest(body)) {
 		return jsonError("Lesson and language context are required.", 400);
 	}
 

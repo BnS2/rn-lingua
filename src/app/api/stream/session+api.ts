@@ -1,13 +1,5 @@
 import { StreamClient } from "@stream-io/node-sdk";
-
-type ClerkTokenPayload = {
-	sub?: string;
-	name?: string;
-	given_name?: string;
-	family_name?: string;
-	image_url?: string;
-	picture?: string;
-};
+import { getSignedInUser } from "@/lib/clerkAuth";
 
 type StreamSession = {
 	apiKey: string;
@@ -24,46 +16,12 @@ function jsonError(message: string, status: number) {
 	return Response.json({ error: message }, { status });
 }
 
-function decodeJwtPayload(token: string): ClerkTokenPayload | null {
-	const payload = token.split(".")[1];
-
-	if (!payload) {
-		return null;
-	}
-
-	try {
-		const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-		const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-		return JSON.parse(atob(padded)) as ClerkTokenPayload;
-	} catch {
-		return null;
-	}
-}
-
-function getSignedInUser(request: Request) {
-	const authorization = request.headers.get("authorization");
-	const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
-	const payload = token ? decodeJwtPayload(token) : null;
-
-	if (!payload?.sub) {
-		return null;
-	}
-
-	const fallbackName = [payload.given_name, payload.family_name].filter(Boolean).join(" ");
-
-	return {
-		id: payload.sub,
-		name: payload.name ?? fallbackName,
-		image: payload.image_url ?? payload.picture,
-	};
-}
-
 export async function GET(request: Request) {
 	if (!apiKey || !apiSecret) {
 		return jsonError("Stream API key or secret is not configured.", 500);
 	}
 
-	const signedInUser = getSignedInUser(request);
+	const signedInUser = await getSignedInUser(request);
 
 	if (!signedInUser) {
 		return jsonError("Sign in before connecting to Stream.", 401);

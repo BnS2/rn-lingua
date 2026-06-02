@@ -1,6 +1,4 @@
-type ClerkTokenPayload = {
-	sub?: string;
-};
+import { getSignedInUser } from "@/lib/clerkAuth";
 
 type StartAgentRequest = {
 	callId?: string;
@@ -8,37 +6,20 @@ type StartAgentRequest = {
 };
 
 const agentServerUrl = process.env.VISION_AGENT_SERVER_URL ?? "http://localhost:8000";
+const agentRequestTimeoutMs = Number(process.env.VISION_AGENT_REQUEST_TIMEOUT_MS ?? 8000);
 
 function jsonError(message: string, status: number) {
 	return Response.json({ error: message }, { status });
 }
 
-function decodeJwtPayload(token: string): ClerkTokenPayload | null {
-	const payload = token.split(".")[1];
-
-	if (!payload) {
-		return null;
-	}
-
-	try {
-		const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-		const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-		return JSON.parse(atob(padded)) as ClerkTokenPayload;
-	} catch {
-		return null;
-	}
-}
-
-function isSignedIn(request: Request) {
-	const authorization = request.headers.get("authorization");
-	const token = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
-	const payload = token ? decodeJwtPayload(token) : null;
-
-	return Boolean(payload?.sub);
+function isAbortError(error: unknown) {
+	return error instanceof DOMException && error.name === "AbortError";
 }
 
 export async function POST(request: Request) {
-	if (!isSignedIn(request)) {
+	const signedInUser = await getSignedInUser(request);
+
+	if (!signedInUser) {
 		return jsonError("Sign in before starting the AI teacher.", 401);
 	}
 
@@ -54,6 +35,9 @@ export async function POST(request: Request) {
 		return jsonError("Audio room call context is required.", 400);
 	}
 
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), agentRequestTimeoutMs);
+
 	try {
 		const response = await fetch(
 			`${agentServerUrl.replace(/\/$/, "")}/calls/${encodeURIComponent(body.callId)}/sessions`,
@@ -61,10 +45,11 @@ export async function POST(request: Request) {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ call_type: body.callType }),
+				signal: controller.signal,
 			},
 		);
-		const responseBody = (await response.json().catch(() => null)) as unknown;
 
+		const responseBody = (await response.json().catch(() => null)) as unknown;
 		if (!response.ok) {
 			return Response.json(
 				{ error: "Unable to start the AI teacher.", details: responseBody },
@@ -74,7 +59,14 @@ export async function POST(request: Request) {
 
 		return Response.json(responseBody, { status: 201 });
 	} catch (error) {
+		if (isAbortError(error)) {
+			console.error("Vision Agent start timed out:", error);
+			return jsonError("The AI teacher service timed out.", 504);
+		}
+
 		console.error("Vision Agent start failed:", error);
 		return jsonError("Unable to reach the AI teacher service.", 502);
+	} finally {
+		clearTimeout(timeout);
 	}
 }
