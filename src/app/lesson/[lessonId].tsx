@@ -1,16 +1,30 @@
+import { useAuth, useUser } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
+import {
+	type Call,
+	CallingState,
+	StreamVideoClient,
+	type TokenProvider,
+	type User,
+} from "@stream-io/video-react-native-sdk";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { images } from "@/constants/images";
 import { getLanguageByCode } from "@/data/languages";
 import { getLessonById } from "@/data/lessons";
+import { getApiUrl } from "@/lib/api";
+import { useLanguageStore } from "@/store/languageStore";
+import type { StreamAudioCallSession } from "@/types/stream";
 
 type ControlButton = {
 	label: string;
 	icon: keyof typeof Ionicons.glyphMap;
 	variant?: "danger";
+	disabled?: boolean;
+	onPress: () => void;
 };
 
 type TabButton = {
@@ -25,12 +39,14 @@ type TabButton = {
 		| "/(tabs)/profile";
 };
 
-const controls: ControlButton[] = [
-	{ label: "Audio", icon: "volume-high" },
-	{ label: "Mic", icon: "mic" },
-	{ label: "Subtitles", icon: "language" },
-	{ label: "End Call", icon: "call", variant: "danger" },
-];
+type CallStatus = "idle" | "creating" | "connecting" | "joined" | "ended" | "error";
+type AgentConnectionStatus = "idle" | "connecting" | "connected" | "failed";
+
+type VisionAgentSession = {
+	session_id: string;
+	call_id: string;
+	session_started_at: string;
+};
 
 const tabs: TabButton[] = [
 	{ label: "Home", icon: "home-outline", activeIcon: "home", href: "/(tabs)/home" },
@@ -48,9 +64,397 @@ const tabs: TabButton[] = [
 export default function AudioLessonScreen() {
 	const router = useRouter();
 	const insets = useSafeAreaInsets();
+	const { getToken, isLoaded: isAuthLoaded, userId } = useAuth();
+	const { user } = useUser();
 	const { lessonId } = useLocalSearchParams<{ lessonId: string }>();
+	const selectedLanguageCode = useLanguageStore((state) => state.selectedLanguageCode);
 	const lesson = lessonId ? getLessonById(lessonId) : undefined;
-	const language = lesson ? getLanguageByCode(lesson.languageCode) : undefined;
+	const activeLanguageCode =
+		lesson && selectedLanguageCode === lesson.languageCode
+			? selectedLanguageCode
+			: lesson?.languageCode;
+	const language = activeLanguageCode ? getLanguageByCode(activeLanguageCode) : undefined;
+	const [activeCall, setActiveCall] = useState<Call | null>(null);
+	const [callStatus, setCallStatus] = useState<CallStatus>("idle");
+	const [callError, setCallError] = useState<string | null>(null);
+	const [agentStatus, setAgentStatus] = useState<AgentConnectionStatus>("idle");
+	const [agentError, setAgentError] = useState<string | null>(null);
+	const [agentSession, setAgentSession] = useState<VisionAgentSession | null>(null);
+	const [isCameraOn, setIsCameraOn] = useState(false);
+	const [isMuted, setIsMuted] = useState(false);
+	const [showSubtitles, setShowSubtitles] = useState(true);
+	const [streamClient, setStreamClient] = useState<StreamVideoClient | null>(null);
+	const didAutoStartCall = useRef(false);
+	const activeCallRef = useRef<Call | null>(null);
+	const agentSessionRef = useRef<VisionAgentSession | null>(null);
+	const getTokenRef = useRef(getToken);
+	const isMountedRef = useRef(false);
+	const streamClientRef = useRef<StreamVideoClient | null>(null);
+
+	const isBusy = callStatus === "creating" || callStatus === "connecting";
+	const isJoined = callStatus === "joined";
+
+	useEffect(() => {
+		getTokenRef.current = getToken;
+	}, [getToken]);
+
+	useEffect(() => {
+		agentSessionRef.current = agentSession;
+	}, [agentSession]);
+
+	const stopAgentSession = useCallback(async () => {
+		const agentSession = agentSessionRef.current;
+
+		if (!agentSession) {
+			return;
+		}
+
+		agentSessionRef.current = null;
+
+		try {
+			const clerkToken = await getTokenRef.current();
+
+			if (!clerkToken) {
+				throw new Error("Missing Clerk session token.");
+			}
+
+			const response = await fetch(getApiUrl("/api/vision-agent/stop"), {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${clerkToken}`,
+				},
+				body: JSON.stringify({
+					callId: agentSession.call_id,
+					sessionId: agentSession.session_id,
+				}),
+			});
+
+			if (!response.ok && response.status !== 204) {
+				throw new Error("Unable to stop the AI teacher.");
+			}
+
+			if (isMountedRef.current) {
+				setAgentSession(null);
+				setAgentStatus("idle");
+				setAgentError(null);
+			}
+		} catch (error) {
+			console.warn("Failed to stop Vision Agent session:", error);
+
+			if (isMountedRef.current) {
+				setAgentStatus("failed");
+				setAgentError(error instanceof Error ? error.message : "Unable to stop the AI teacher.");
+			}
+		}
+	}, []);
+
+	const cleanupLessonResources = useCallback(async () => {
+		await stopAgentSession();
+
+		const currentCall = activeCallRef.current;
+
+		if (currentCall?.state.callingState !== CallingState.LEFT) {
+			try {
+				await currentCall?.leave();
+			} catch (error) {
+				console.warn("Failed to leave Stream audio lesson call:", error);
+			}
+		}
+
+		activeCallRef.current = null;
+
+		const currentClient = streamClientRef.current;
+
+		if (currentClient) {
+			try {
+				await currentClient.disconnectUser();
+			} catch (error) {
+				console.warn("Failed to disconnect Stream audio lesson client:", error);
+			}
+		}
+
+		streamClientRef.current = null;
+	}, [stopAgentSession]);
+
+	useEffect(() => {
+		isMountedRef.current = true;
+
+		return () => {
+			isMountedRef.current = false;
+			cleanupLessonResources();
+		};
+	}, [cleanupLessonResources]);
+
+	const signedInUserName = useMemo(
+		() => user?.fullName ?? user?.firstName ?? user?.username ?? "Language learner",
+		[user?.firstName, user?.fullName, user?.username],
+	);
+
+	const requestCallSession = useCallback(async () => {
+		if (!lesson || !language) {
+			throw new Error("Lesson and language context are required.");
+		}
+
+		if (!isAuthLoaded || !userId) {
+			throw new Error("Sign in before starting an audio lesson.");
+		}
+
+		const clerkToken = await getToken();
+
+		if (!clerkToken) {
+			throw new Error("Missing Clerk session token.");
+		}
+
+		const response = await fetch(getApiUrl("/api/stream/audio-call"), {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${clerkToken}`,
+			},
+			body: JSON.stringify({
+				lessonId: lesson.id,
+				lessonTitle: lesson.title,
+				lessonDescription: lesson.description,
+				languageCode: language.code,
+				languageName: language.name,
+				goals: lesson.goals,
+				vocabulary: lesson.vocabulary,
+				phrases: lesson.phrases,
+				aiTeacherPrompt: lesson.aiTeacherPrompt,
+				userName: signedInUserName,
+				userImage: user?.imageUrl,
+			}),
+		});
+
+		if (!response.ok) {
+			const body = (await response.json().catch(() => null)) as { error?: string } | null;
+			throw new Error(body?.error ?? "Unable to create Stream audio lesson call.");
+		}
+
+		return (await response.json()) as StreamAudioCallSession;
+	}, [getToken, isAuthLoaded, language, lesson, signedInUserName, user?.imageUrl, userId]);
+
+	const requestStreamToken = useCallback(async () => {
+		const clerkToken = await getToken();
+
+		if (!clerkToken) {
+			throw new Error("Missing Clerk session token.");
+		}
+
+		const response = await fetch(getApiUrl("/api/stream/session"), {
+			method: "GET",
+			headers: {
+				Authorization: `Bearer ${clerkToken}`,
+			},
+		});
+
+		if (!response.ok) {
+			throw new Error("Unable to refresh Stream token.");
+		}
+
+		const session = (await response.json()) as Pick<StreamAudioCallSession, "token">;
+		return session.token;
+	}, [getToken]);
+
+	const getLessonStreamClient = useCallback(
+		(session: StreamAudioCallSession) => {
+			if (streamClient) {
+				return streamClient;
+			}
+
+			const streamUser: User = {
+				id: session.userId,
+				name: session.userName,
+				image: session.userImage,
+			};
+			const tokenProvider: TokenProvider = requestStreamToken;
+			const client = StreamVideoClient.getOrCreateInstance({
+				apiKey: session.apiKey,
+				user: streamUser,
+				token: session.token,
+				tokenProvider,
+			});
+
+			setStreamClient(client);
+			streamClientRef.current = client;
+			return client;
+		},
+		[requestStreamToken, streamClient],
+	);
+
+	const startAgentSession = useCallback(
+		async (session: StreamAudioCallSession) => {
+			setAgentStatus("connecting");
+			setAgentError(null);
+
+			try {
+				const clerkToken = await getToken();
+
+				if (!clerkToken) {
+					throw new Error("Missing Clerk session token.");
+				}
+
+				const response = await fetch(getApiUrl("/api/vision-agent/start"), {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${clerkToken}`,
+					},
+					body: JSON.stringify({
+						callId: session.callId,
+						callType: session.callType,
+					}),
+				});
+
+				const responseBody = (await response.json().catch(() => null)) as
+					| VisionAgentSession
+					| { error?: string }
+					| null;
+
+				if (!response.ok || !responseBody || !("session_id" in responseBody)) {
+					throw new Error(
+						(responseBody && "error" in responseBody && responseBody.error) ||
+							"Unable to connect the AI teacher.",
+					);
+				}
+
+				if (
+					!isMountedRef.current ||
+					activeCallRef.current?.state.callingState === CallingState.LEFT
+				) {
+					await fetch(getApiUrl("/api/vision-agent/stop"), {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+							Authorization: `Bearer ${clerkToken}`,
+						},
+						body: JSON.stringify({
+							callId: responseBody.call_id,
+							sessionId: responseBody.session_id,
+						}),
+					});
+					return;
+				}
+
+				agentSessionRef.current = responseBody;
+				setAgentSession(responseBody);
+				setAgentStatus("connected");
+			} catch (error) {
+				setAgentStatus("failed");
+				setAgentError(error instanceof Error ? error.message : "Unable to connect the AI teacher.");
+			}
+		},
+		[getToken],
+	);
+
+	const startOrJoinCall = useCallback(async () => {
+		if (isBusy || isJoined) {
+			return;
+		}
+
+		setCallStatus("creating");
+		setCallError(null);
+
+		try {
+			const session = await requestCallSession();
+			const streamClient = getLessonStreamClient(session);
+			setCallStatus("connecting");
+
+			const call = streamClient.call(session.callType, session.callId, { reuseInstance: true });
+			call.setDisconnectionTimeout(120);
+			activeCallRef.current = call;
+			setActiveCall(call);
+
+			await call.join({ create: true });
+			await call.camera.disable();
+			await call.microphone.enable();
+
+			setIsCameraOn(false);
+			setIsMuted(false);
+			setCallStatus("joined");
+			await startAgentSession(session);
+			didAutoStartCall.current = true;
+		} catch (error) {
+			didAutoStartCall.current = false;
+			setCallStatus("error");
+			setCallError(error instanceof Error ? error.message : "Unable to join the audio lesson.");
+		}
+	}, [getLessonStreamClient, isBusy, isJoined, requestCallSession, startAgentSession]);
+
+	useEffect(() => {
+		if (didAutoStartCall.current || !lesson || !language || !isAuthLoaded || !userId) {
+			return;
+		}
+
+		startOrJoinCall();
+	}, [isAuthLoaded, language, lesson, startOrJoinCall, userId]);
+
+	const toggleCamera = useCallback(async () => {
+		if (!activeCall || !isJoined) {
+			return;
+		}
+
+		try {
+			if (isCameraOn) {
+				await activeCall.camera.disable();
+				setIsCameraOn(false);
+				return;
+			}
+
+			await activeCall.camera.enable();
+			setIsCameraOn(true);
+		} catch (error) {
+			setCallError(error instanceof Error ? error.message : "Unable to update camera.");
+		}
+	}, [activeCall, isCameraOn, isJoined]);
+
+	const toggleMute = useCallback(async () => {
+		if (!activeCall || !isJoined) {
+			return;
+		}
+
+		try {
+			if (isMuted) {
+				await activeCall.microphone.enable();
+				setIsMuted(false);
+				return;
+			}
+
+			await activeCall.microphone.disable();
+			setIsMuted(true);
+		} catch (error) {
+			setCallError(error instanceof Error ? error.message : "Unable to update microphone.");
+		}
+	}, [activeCall, isJoined, isMuted]);
+
+	const toggleSubtitles = useCallback(() => {
+		setShowSubtitles((currentValue) => !currentValue);
+	}, []);
+
+	const endCall = useCallback(async () => {
+		if (!activeCall) {
+			setCallStatus("ended");
+			router.replace("/(tabs)/learn");
+			return;
+		}
+
+		try {
+			await stopAgentSession();
+
+			if (activeCall.state.callingState !== CallingState.LEFT) {
+				await activeCall.leave();
+			}
+			setActiveCall(null);
+			setIsCameraOn(false);
+			setIsMuted(false);
+			setCallStatus("ended");
+			router.replace("/(tabs)/learn");
+		} catch (error) {
+			setCallStatus("error");
+			setCallError(error instanceof Error ? error.message : "Unable to end the audio lesson.");
+		}
+	}, [activeCall, router, stopAgentSession]);
 
 	if (!lesson) {
 		return (
@@ -80,6 +484,73 @@ export default function AudioLessonScreen() {
 	const teacherBubbleTitle =
 		language?.code === "es" ? "Muy bien!" : language?.code === "fr" ? "Tres bien!" : "Great job!";
 	const activePhrase = firstPhrase?.text ?? lesson.title;
+	const callStatusLabel =
+		callStatus === "creating"
+			? "Creating call"
+			: callStatus === "connecting"
+				? "Connecting"
+				: callStatus === "joined"
+					? "Online"
+					: callStatus === "ended"
+						? "Call ended"
+						: callStatus === "error"
+							? "Needs attention"
+							: "Ready to join";
+	const callStatusDotColor =
+		callStatus === "joined"
+			? "#18D313"
+			: callStatus === "creating" || callStatus === "connecting"
+				? "#FFB020"
+				: callStatus === "error"
+					? "#FF424B"
+					: "#A8AFBF";
+	const agentStatusLabel =
+		agentStatus === "connecting"
+			? "AI teacher connecting"
+			: agentStatus === "connected"
+				? "AI teacher connected"
+				: agentStatus === "failed"
+					? "AI teacher failed"
+					: "AI teacher idle";
+	const agentStatusDotColor =
+		agentStatus === "connected"
+			? "#18D313"
+			: agentStatus === "connecting"
+				? "#FFB020"
+				: agentStatus === "failed"
+					? "#FF424B"
+					: "#A8AFBF";
+	const renderControl = (control: ControlButton) => {
+		const isDanger = control.variant === "danger";
+		const isDisabled = control.disabled;
+
+		return (
+			<View key={control.label} style={styles.controlItem}>
+				<TouchableOpacity
+					accessibilityLabel={control.label}
+					accessibilityRole="button"
+					accessibilityState={isDisabled ? { disabled: true } : undefined}
+					activeOpacity={0.82}
+					disabled={isDisabled}
+					style={[
+						styles.controlCircle,
+						isDanger && styles.dangerControlCircle,
+						isDisabled && styles.disabledControlCircle,
+					]}
+					onPress={control.onPress}
+				>
+					<Ionicons
+						name={control.icon}
+						size={isDanger ? 34 : 31}
+						color={isDanger ? "#FFFFFF" : "#06133D"}
+					/>
+				</TouchableOpacity>
+				<Text className="font-poppins-bold text-[14px] leading-[18px] text-white">
+					{control.label}
+				</Text>
+			</View>
+		);
+	};
 
 	return (
 		<SafeAreaView style={styles.safeArea}>
@@ -106,16 +577,22 @@ export default function AudioLessonScreen() {
 							AI Teacher
 						</Text>
 						<View className="mt-1 flex-row items-center gap-2">
-							<View className="h-[13px] w-[13px] rounded-full bg-[#18D313]" />
+							<View style={[styles.callStatusDot, { backgroundColor: callStatusDotColor }]} />
 							<Text className="font-poppins-medium text-[17px] leading-[22px] text-[#58617E]">
-								Online
+								{callStatusLabel}
+							</Text>
+						</View>
+						<View className="mt-1 flex-row items-center gap-2">
+							<View style={[styles.agentStatusDot, { backgroundColor: agentStatusDotColor }]} />
+							<Text className="font-poppins-medium text-[12px] leading-[16px] text-[#7B849B]">
+								{agentStatusLabel}
 							</Text>
 						</View>
 					</View>
 
 					<View className="flex-row items-center gap-3">
 						{[
-							{ label: "Audio lesson", icon: "volume-high" as const },
+							{ label: "Video lesson", icon: "videocam" as const },
 							{ label: "Session minutes", text: String(lesson.estimatedMinutes * 2) },
 							{ label: "Notifications", icon: "notifications-outline" as const },
 						].map((item) => (
@@ -158,7 +635,9 @@ export default function AudioLessonScreen() {
 						<Image source={images.mascotLogo} style={styles.previewMascot} contentFit="contain" />
 						<View style={styles.previewStatus}>
 							<Ionicons name="radio" size={13} color="#21C16B" />
-							<Text className="font-poppins-bold text-[10px] text-neutral-primary">Audio</Text>
+							<Text className="font-poppins-bold text-[10px] text-neutral-primary">
+								{isMuted ? "Muted" : "Audio"}
+							</Text>
 						</View>
 					</View>
 
@@ -183,30 +662,47 @@ export default function AudioLessonScreen() {
 						<View style={styles.bubbleTail} />
 					</View>
 
-					<View style={styles.controlDock}>
-						{controls.map((control) => {
-							const isDanger = control.variant === "danger";
+					{callError || agentError ? (
+						<View style={styles.callErrorCard}>
+							<Ionicons name="alert-circle" size={17} color="#FF424B" />
+							<Text className="flex-1 font-poppins-semibold text-[11px] leading-[15px] text-[#9C2630]">
+								{callError ?? agentError}
+							</Text>
+						</View>
+					) : null}
 
-							return (
-								<View key={control.label} className="items-center gap-2">
-									<TouchableOpacity
-										accessibilityLabel={control.label}
-										accessibilityRole="button"
-										activeOpacity={0.82}
-										style={[styles.controlCircle, isDanger && styles.dangerControlCircle]}
-									>
-										<Ionicons
-											name={control.icon}
-											size={isDanger ? 34 : 31}
-											color={isDanger ? "#FFFFFF" : "#06133D"}
-										/>
-									</TouchableOpacity>
-									<Text className="font-poppins-bold text-[14px] leading-[18px] text-white">
-										{control.label}
-									</Text>
-								</View>
-							);
+					<View style={styles.controlDock}>
+						{renderControl({
+							label: "Camera",
+							icon: "videocam",
+							disabled: !isJoined,
+							onPress: toggleCamera,
 						})}
+						{renderControl({
+							label: "Mic",
+							icon: isMuted ? "mic-off" : "mic",
+							disabled: !isJoined,
+							onPress: toggleMute,
+						})}
+						{renderControl({
+							label: "Subtitles",
+							icon: showSubtitles ? "language" : "text-outline",
+							onPress: toggleSubtitles,
+						})}
+						<View style={styles.controlItem}>
+							<TouchableOpacity
+								accessibilityLabel="End Call"
+								accessibilityRole="button"
+								activeOpacity={0.82}
+								style={[styles.controlCircle, styles.dangerControlCircle]}
+								onPress={endCall}
+							>
+								<Ionicons name="call" size={34} color="#FFFFFF" />
+							</TouchableOpacity>
+							<Text className="font-poppins-bold text-[14px] leading-[18px] text-white">
+								End Call
+							</Text>
+						</View>
 					</View>
 				</View>
 
@@ -326,6 +822,16 @@ const styles = StyleSheet.create({
 		includeFontPadding: false,
 		textAlign: "center",
 	},
+	callStatusDot: {
+		width: 13,
+		height: 13,
+		borderRadius: 7,
+	},
+	agentStatusDot: {
+		width: 9,
+		height: 9,
+		borderRadius: 5,
+	},
 	teacherStage: {
 		height: 504,
 		overflow: "hidden",
@@ -343,7 +849,7 @@ const styles = StyleSheet.create({
 		right: 0,
 		bottom: 0,
 		left: 0,
-		height: "44%",
+		height: "33%",
 		backgroundColor: "rgba(56, 48, 55, 0.34)",
 	},
 	lessonPill: {
@@ -396,7 +902,7 @@ const styles = StyleSheet.create({
 	responseBubble: {
 		position: "absolute",
 		right: 72,
-		bottom: 176,
+		bottom: 190,
 		left: 54,
 		minHeight: 118,
 		flexDirection: "row",
@@ -421,6 +927,20 @@ const styles = StyleSheet.create({
 		borderTopColor: "#FFFFFF",
 		borderLeftColor: "transparent",
 	},
+	callErrorCard: {
+		position: "absolute",
+		right: 18,
+		bottom: 124,
+		left: 18,
+		minHeight: 34,
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 8,
+		borderRadius: 14,
+		backgroundColor: "rgba(255, 239, 241, 0.95)",
+		paddingHorizontal: 12,
+		paddingVertical: 8,
+	},
 	controlCircle: {
 		width: 72,
 		height: 72,
@@ -433,13 +953,20 @@ const styles = StyleSheet.create({
 	dangerControlCircle: {
 		backgroundColor: "#FF424B",
 	},
+	disabledControlCircle: {
+		opacity: 0.58,
+	},
+	controlItem: {
+		flex: 1,
+		alignItems: "center",
+		gap: 5,
+	},
 	controlDock: {
 		position: "absolute",
 		right: 12,
-		bottom: 22,
+		bottom: 34,
 		left: 12,
 		flexDirection: "row",
-		justifyContent: "space-around",
 	},
 	feedbackColumn: {
 		flex: 1,

@@ -9,7 +9,11 @@
 		"userInterfaceStyle": "automatic",
 		"ios": {
 			"icon": "./assets/images/app-icon.png",
-			"bundleIdentifier": "com.bns2.duolingo-clone"
+			"bundleIdentifier": "com.bns2.duolingo-clone",
+			"infoPlist": {
+				"NSCameraUsageDescription": "Lingua uses camera access for AI teacher video lessons.",
+				"NSMicrophoneUsageDescription": "Lingua uses microphone access for live audio lessons."
+			}
 		},
 		"android": {
 			"adaptiveIcon": {
@@ -19,10 +23,11 @@
 				"monochromeImage": "./assets/images/android-icon-monochrome.png"
 			},
 			"predictiveBackGestureEnabled": false,
-			"package": "com.bns2.duolingoclone"
+			"package": "com.bns2.duolingoclone",
+			"permissions": ["CAMERA", "RECORD_AUDIO", "MODIFY_AUDIO_SETTINGS", "BLUETOOTH_CONNECT"]
 		},
 		"web": {
-			"output": "static",
+			"output": "server",
 			"favicon": "./assets/images/favicon.png"
 		},
 		"plugins": [
@@ -38,7 +43,23 @@
 				}
 			],
 			"@clerk/expo",
-			"expo-secure-store"
+			"expo-secure-store",
+			"@stream-io/video-react-native-sdk",
+			[
+				"@config-plugins/react-native-webrtc",
+				{
+					"cameraPermission": "Lingua uses camera access for AI teacher video lessons.",
+					"microphonePermission": "Lingua uses microphone access for live audio lessons."
+				}
+			],
+			[
+				"expo-build-properties",
+				{
+					"android": {
+						"minSdkVersion": 24
+					}
+				}
+			]
 		],
 		"experiments": {
 			"typedRoutes": true,

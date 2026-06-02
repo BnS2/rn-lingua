@@ -1,3 +1,4 @@
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import "../global.css";
 
 import { ClerkProvider } from "@clerk/expo";
@@ -6,6 +7,7 @@ import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
 const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
@@ -40,12 +42,16 @@ export default function RootLayout() {
 
 	return (
 		<ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
-			<Stack
-				screenOptions={{
-					headerShown: false,
-					animation: "slide_from_right",
-				}}
-			/>
+			<GestureHandlerRootView style={{ flex: 1 }}>
+				<SafeAreaProvider>
+					<Stack
+						screenOptions={{
+							headerShown: false,
+							animation: "slide_from_right",
+						}}
+					/>
+				</SafeAreaProvider>
+			</GestureHandlerRootView>
 		</ClerkProvider>
 	);
 }
