@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -185,6 +186,25 @@ def get_lesson_target_items(lesson_context: dict[str, Any]) -> list[dict[str, An
     return target_items
 
 
+def normalize_spoken_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return " ".join(
+        "".join(character.lower() if character.isalnum() else " " for character in normalized).split()
+    )
+
+
+def is_target_completed_by_transcript(target: dict[str, Any], transcript: str) -> bool:
+    target_text = target.get("text")
+
+    if not isinstance(target_text, str):
+        return False
+
+    normalized_target = normalize_spoken_text(target_text)
+    normalized_transcript = normalize_spoken_text(transcript)
+
+    return bool(normalized_target and normalized_target in normalized_transcript)
+
+
 def fetch_call_custom_data(call_type: str, call_id: str) -> dict[str, Any]:
     stream = getstream.Client(
         api_key=required_env("STREAM_API_KEY"),
@@ -350,6 +370,7 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
         current_target_index = 0
         learner_attempt_count = 0
         teacher_feedback_count = 0
+        completed_target_ids: set[str] = set()
         has_pending_learner_feedback = False
         has_finished_required_targets = False
         has_emitted_ready_to_finish = False
@@ -439,9 +460,18 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
                 logger.exception("Failed to send Vision Agent closed caption.")
 
         async def emit_lesson_ready_to_finish() -> None:
-            attempted_every_target = learner_attempt_count >= minimum_attempts_for_completion
+            completed_target_count = (
+                len(completed_target_ids)
+                if lesson_targets
+                else min(learner_attempt_count, minimum_attempts_for_completion)
+            )
+            attempted_every_target = (
+                completed_target_count >= len(lesson_targets)
+                if lesson_targets
+                else learner_attempt_count >= minimum_attempts_for_completion
+            )
             covered_target_count = min(
-                max(current_target_index + 1, learner_attempt_count),
+                max(completed_target_count, current_target_index + 1, learner_attempt_count),
                 max(len(lesson_targets), 1),
             )
             target_count = max(len(lesson_targets), 1)
@@ -512,6 +542,15 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
             if event.text.strip():
                 logger.info("Learner transcript: %s", event.text.strip())
                 learner_attempt_count += 1
+                if lesson_targets:
+                    target = lesson_targets[min(current_target_index, len(lesson_targets) - 1)]
+                    target_id = target.get("id")
+
+                    if (
+                        isinstance(target_id, str)
+                        and is_target_completed_by_transcript(target, event.text)
+                    ):
+                        completed_target_ids.add(target_id)
                 has_pending_learner_feedback = True
 
         @agent.events.subscribe
@@ -531,14 +570,37 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
             teacher_feedback_count += 1
             has_pending_learner_feedback = False
-            current_target_index = min(current_target_index + 1, max(len(lesson_targets) - 1, 0))
-            has_finished_required_targets = (
-                learner_attempt_count >= minimum_attempts_for_completion
-                and teacher_feedback_count >= minimum_attempts_for_completion
-            )
+            previous_target_index = current_target_index
+
+            if lesson_targets:
+                target_ids = [
+                    target["id"]
+                    for target in lesson_targets
+                    if isinstance(target.get("id"), str)
+                ]
+                has_finished_required_targets = all(
+                    target_id in completed_target_ids for target_id in target_ids
+                )
+
+                if not has_finished_required_targets:
+                    current_target_index = next(
+                        (
+                            index
+                            for index, target in enumerate(lesson_targets)
+                            if target.get("id") not in completed_target_ids
+                        ),
+                        current_target_index,
+                    )
+            else:
+                has_finished_required_targets = (
+                    learner_attempt_count >= minimum_attempts_for_completion
+                    and teacher_feedback_count >= minimum_attempts_for_completion
+                )
 
             if not has_finished_required_targets:
-                await emit_lesson_target("next")
+                await emit_lesson_target(
+                    "next" if current_target_index != previous_target_index else "retry"
+                )
                 return
 
             if not has_emitted_ready_to_finish:

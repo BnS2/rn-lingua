@@ -83,12 +83,6 @@ const migrateProgressStorage = (
 	persistedState: unknown,
 	persistedVersion: number,
 ): Partial<ProgressState> => {
-	if (persistedVersion < 2) {
-		return {
-			progressByLanguage: {},
-		};
-	}
-
 	if (!persistedState || typeof persistedState !== "object") {
 		return {};
 	}

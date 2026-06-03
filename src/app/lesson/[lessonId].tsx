@@ -485,7 +485,11 @@ export default function AudioLessonScreen() {
 	const shouldShowCompletedLessonView =
 		Boolean(lesson && isLessonCompleted && !isRetryingCompletedLesson) && !isBusy && !isJoined;
 	const shouldShowLessonReview = Boolean(
-		lesson && lessonReview && !isLessonCompleted && !isBusy && !isJoined,
+		lesson &&
+			lessonReview &&
+			(!isLessonCompleted || isRetryingCompletedLesson) &&
+			!isBusy &&
+			!isJoined,
 	);
 	const isTeacherTalking = isTeacherTurnActive || Boolean(interimCaptionTextBySpeaker.teacher);
 	const isTeacherThinking = isAwaitingTeacherResponse && !isTeacherTalking;
@@ -1137,14 +1141,10 @@ export default function AudioLessonScreen() {
 
 			didFinishLessonRef.current = true;
 			await cleanupLessonResources();
-			if (lesson) {
-				markLessonCompleted(lesson.languageCode, lesson.id, lesson.xpReward, nextReview);
-			}
 			setActiveCall(null);
 			setStreamClient(null);
 			setIsMicOpen(false);
 			setIsMicReleasing(false);
-			setIsRetryingCompletedLesson(false);
 			setLessonReview(nextReview);
 			setCallStatus("ended");
 		},
@@ -1152,12 +1152,9 @@ export default function AudioLessonScreen() {
 			clampedTargetIndex,
 			cleanupLessonResources,
 			learnerAttemptCount,
-			lesson,
-			markLessonCompleted,
 			setActiveCall,
 			setCallStatus,
 			setIsMicOpen,
-			setIsRetryingCompletedLesson,
 			setLessonReview,
 			setStreamClient,
 			targetCount,
@@ -1232,10 +1229,6 @@ export default function AudioLessonScreen() {
 					);
 					setLatestTeacherSpeechText(caption.text);
 					setIsAwaitingTeacherResponse(false);
-				}
-
-				if (caption.speakerKind === "learner") {
-					setLearnerAttemptCount((currentValue) => Math.max(currentValue, 1));
 				}
 			}
 
@@ -1384,9 +1377,12 @@ export default function AudioLessonScreen() {
 	]);
 
 	const completeReviewedLesson = useCallback(() => {
+		if (lesson && lessonReview) {
+			markLessonCompleted(lesson.languageCode, lesson.id, lesson.xpReward, lessonReview);
+		}
 		setIsRetryingCompletedLesson(false);
 		setCallStatus("ended");
-	}, [setCallStatus, setIsRetryingCompletedLesson]);
+	}, [lesson, lessonReview, markLessonCompleted, setCallStatus, setIsRetryingCompletedLesson]);
 
 	const finishReadyLesson = useCallback(() => {
 		didRequestFinishLessonRef.current = true;

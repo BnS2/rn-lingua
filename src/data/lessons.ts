@@ -112,12 +112,12 @@ export const lessons = [
 				kind: "ai-teacher-prompt",
 				prompt: "Practice describing your morning with the AI teacher.",
 				teacherPrompt:
-					"Ask the learner to try one short Spanish morning sentence using only el desayuno or Como te llamas? if they need support.",
+					"Ask the learner to describe their morning routine with one short Spanish sentence that starts with Por la manana yo.",
 				expectedLearnerResponse: "Por la manana yo...",
 			},
 		],
 		aiTeacherPrompt:
-			"Teach only this Spanish daily-life lesson: el desayuno and Como te llamas? Mostly speak English, introduce each Spanish phrase slowly with its meaning, listen to the learner's answer, and gently ask them to repeat or try one short response.",
+			"Teach only this Spanish daily-life lesson: el desayuno, Como te llamas?, and a short morning routine sentence starting with Por la manana yo. Mostly speak English, introduce each Spanish phrase slowly with its meaning, listen to the learner's answer, and gently ask them to describe their morning with one short response.",
 	},
 	{
 		id: "es-at-the-cafe",

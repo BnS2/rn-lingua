@@ -24,6 +24,6 @@ declare module "*.svg" {
 }
 
 declare module "*.wav" {
-	const value: any;
+	const value: import("expo-audio").AudioSource;
 	export default value;
 }

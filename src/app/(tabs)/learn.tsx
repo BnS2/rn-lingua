@@ -141,8 +141,7 @@ export default function LearnScreen() {
 						<View style={styles.headerText}>
 							<Text style={styles.title}>{activeLesson?.title ?? "Lessons"}</Text>
 							<Text style={styles.subtitle}>
-								Unit {Math.min(activeLessonIndex + 1, Math.max(lessons.length, 1))} •{" "}
-								{completedCount} / {lessons.length || 1} lessons
+								Unit {currentUnit?.order ?? 1} • {completedCount} / {lessons.length || 1} lessons
 							</Text>
 						</View>
 
@@ -186,6 +185,7 @@ export default function LearnScreen() {
 					{lessons.map((lesson, index) => {
 						const status = getLessonStatus(lesson.id, index, completedLessonIds, activeLessonIndex);
 						const isActive = status === "in-progress";
+						const isLocked = status === "not-started";
 
 						return (
 							<TouchableOpacity
@@ -193,8 +193,13 @@ export default function LearnScreen() {
 								accessibilityLabel={`Open ${lesson.title}`}
 								accessibilityRole="button"
 								activeOpacity={0.86}
+								disabled={isLocked}
 								style={[styles.lessonCard, isActive && styles.activeLessonCard]}
-								onPress={() => openLesson(lesson.id)}
+								onPress={() => {
+									if (!isLocked) {
+										openLesson(lesson.id);
+									}
+								}}
 							>
 								<View style={styles.lessonCopy}>
 									<Text style={[styles.lessonNumber, isActive && styles.activeLessonNumber]}>

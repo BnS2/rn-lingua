@@ -5,8 +5,28 @@ const defaultDevServerPort = "8081";
 
 const trimTrailingSlash = (value: string) => value.replace(/\/$/, "");
 
+const trimSlashes = (value: string) => value.replace(/^\/+|\/+$/g, "");
+
 function isLocalhost(host: string) {
 	return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+function getPathname(uri: string) {
+	const normalizedUri = uri.includes("://") ? uri : `http://${uri}`;
+
+	try {
+		const { pathname } = new URL(normalizedUri);
+		return pathname === "/" ? "" : pathname;
+	} catch {
+		return "";
+	}
+}
+
+function joinUrlPath(baseUrl: string, basePath: string, path: string) {
+	const joinedPath = [trimSlashes(basePath), trimSlashes(path)].filter(Boolean).join("/");
+	const normalizedBaseUrl = trimTrailingSlash(baseUrl);
+
+	return joinedPath ? `${normalizedBaseUrl}/${joinedPath}` : normalizedBaseUrl;
 }
 
 function getHostAndPort(uri?: string | null, defaultPort = defaultDevServerPort) {
@@ -87,16 +107,17 @@ export function getApiUrl(path: string) {
 
 	if (apiBaseUrl) {
 		const parsedApiBaseUrl = getHostAndPort(apiBaseUrl);
+		const apiBasePath = getPathname(apiBaseUrl);
 
 		if (parsedApiBaseUrl && isLocalhost(parsedApiBaseUrl.host)) {
 			const tailscaleUrl = getTailscaleDevServerUrl(parsedApiBaseUrl.port);
 
 			if (tailscaleUrl) {
-				return `${tailscaleUrl}${path}`;
+				return joinUrlPath(tailscaleUrl, apiBasePath, path);
 			}
 		}
 
-		return `${trimTrailingSlash(apiBaseUrl)}${path}`;
+		return joinUrlPath(apiBaseUrl, "", path);
 	}
 
 	if (Platform.OS === "web") {
