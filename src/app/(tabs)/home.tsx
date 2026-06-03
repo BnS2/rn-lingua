@@ -3,7 +3,15 @@ import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { useCallback } from "react";
-import { ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import {
+	Alert,
+	ScrollView,
+	StatusBar,
+	StyleSheet,
+	Text,
+	TouchableOpacity,
+	View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { images } from "@/constants/images";
 import { getLanguageByCode } from "@/data/languages";
@@ -57,10 +65,13 @@ export default function HomeScreen() {
 	const { user } = useUser();
 	const router = useRouter();
 	const selectedLanguageCode = useLanguageStore((s) => s.selectedLanguageCode);
-	const { currentXP, dailyGoalXP, streakCount } = useProgressStore();
+	const activeLanguageCode = selectedLanguageCode ?? "es";
+	const { currentXP, dailyGoalXP, streakCount } = useProgressStore((state) =>
+		state.getProgressForLanguage(activeLanguageCode),
+	);
 
 	const language = selectedLanguageCode ? getLanguageByCode(selectedLanguageCode) : null;
-	const units = selectedLanguageCode ? getUnitsByLanguage(selectedLanguageCode) : [];
+	const units = getUnitsByLanguage(activeLanguageCode);
 	const currentUnit = units[0];
 
 	const displayName = getUserDisplayName(user);
@@ -68,9 +79,15 @@ export default function HomeScreen() {
 	const xpProgress = Math.min(currentXP / dailyGoalXP, 1);
 
 	const handleContinue = useCallback(() => {
-		// Navigate to learn tab when lesson routing is ready
 		router.push("/(tabs)/learn");
 	}, [router]);
+
+	const showDemoMessage = useCallback((title: string) => {
+		Alert.alert(
+			title,
+			"This part is a demo placeholder. Goal tracking and actions will be wired up in a later lesson.",
+		);
+	}, []);
 
 	return (
 		<SafeAreaView style={styles.safeArea}>
@@ -116,6 +133,7 @@ export default function HomeScreen() {
 							accessibilityLabel="Notifications"
 							accessibilityRole="button"
 							className="w-[38px] h-[38px] rounded-full bg-neutral-surface items-center justify-center"
+							onPress={() => showDemoMessage("Notifications")}
 						>
 							<Ionicons name="notifications-outline" size={22} color="#0D132B" />
 						</TouchableOpacity>
@@ -124,7 +142,13 @@ export default function HomeScreen() {
 
 				{/* ── Daily Goal Card ──────────────────────────────────── */}
 				<View className="mx-5 mb-4">
-					<View style={styles.dailyGoalCard}>
+					<TouchableOpacity
+						activeOpacity={0.9}
+						accessibilityLabel="Daily goal demo"
+						accessibilityRole="button"
+						style={styles.dailyGoalCard}
+						onPress={() => showDemoMessage("Daily goal")}
+					>
 						{/* Left: text + progress */}
 						<View className="flex-1 pr-4">
 							<Text className="font-poppins-medium text-[13px] text-neutral-secondary">
@@ -145,7 +169,7 @@ export default function HomeScreen() {
 						</View>
 						{/* Right: treasure chest */}
 						<Image source={images.treasure} style={styles.treasureImage} contentFit="contain" />
-					</View>
+					</TouchableOpacity>
 				</View>
 
 				{/* ── Continue Learning Card ───────────────────────────── */}
@@ -170,7 +194,7 @@ export default function HomeScreen() {
 								style={styles.continueLearningSubtitle}
 							>
 								{language?.code?.toUpperCase() ?? "A1"} •{" "}
-								{currentUnit ? currentUnit.title.replace(/\s*Basics\s*/i, "Unit ") : "Unit 1"}
+								{currentUnit ? `Unit ${currentUnit.order}` : "Unit 1"}
 							</Text>
 							<TouchableOpacity
 								onPress={handleContinue}
@@ -192,7 +216,11 @@ export default function HomeScreen() {
 						<Text className="font-poppins-bold text-[17px] text-neutral-primary">
 							Today&apos;s plan
 						</Text>
-						<TouchableOpacity accessibilityLabel="View all plan items" accessibilityRole="button">
+						<TouchableOpacity
+							accessibilityLabel="View all plan items"
+							accessibilityRole="button"
+							onPress={() => showDemoMessage("Today's plan")}
+						>
 							<Text className="font-poppins-semibold text-[14px] text-lingua-purple">View all</Text>
 						</TouchableOpacity>
 					</View>
@@ -200,10 +228,14 @@ export default function HomeScreen() {
 					{todaysPlan.map((item, index) => {
 						const cfg = PLAN_ICON_CONFIG[item.kind];
 						return (
-							<View
+							<TouchableOpacity
 								key={item.id}
+								activeOpacity={0.86}
+								accessibilityLabel={`${item.title} demo item`}
+								accessibilityRole="button"
 								className="flex-row items-center py-3"
 								style={[index < todaysPlan.length - 1 && styles.planItemBorder]}
+								onPress={() => showDemoMessage(item.title)}
 							>
 								{/* Icon */}
 								<View
@@ -233,7 +265,7 @@ export default function HomeScreen() {
 								) : (
 									<View className="w-[28px] h-[28px] rounded-full border-2 border-gray-300" />
 								)}
-							</View>
+							</TouchableOpacity>
 						);
 					})}
 				</View>
@@ -265,6 +297,7 @@ export default function HomeScreen() {
 								style={styles.videoCallButton}
 								accessibilityLabel="Start AI Video Call"
 								accessibilityRole="button"
+								onPress={() => showDemoMessage("AI video call")}
 							>
 								<Ionicons name="videocam" size={20} color="#FFFFFF" />
 							</TouchableOpacity>

@@ -1,5 +1,5 @@
-import { StreamClient } from "@stream-io/node-sdk";
-import { getSignedInUser } from "@/lib/clerkAuth";
+import { getSignedInUser, isClerkAuthConfigError } from "@/lib/clerkAuth";
+import { createStreamServerClient } from "@/lib/streamServer";
 
 type StreamSession = {
 	apiKey: string;
@@ -21,13 +21,23 @@ export async function GET(request: Request) {
 		return jsonError("Stream API key or secret is not configured.", 500);
 	}
 
-	const signedInUser = await getSignedInUser(request);
+	let signedInUser;
+
+	try {
+		signedInUser = await getSignedInUser(request);
+	} catch (error) {
+		if (isClerkAuthConfigError(error)) {
+			return jsonError(error.message, 500);
+		}
+
+		throw error;
+	}
 
 	if (!signedInUser) {
 		return jsonError("Sign in before connecting to Stream.", 401);
 	}
 
-	const stream = new StreamClient(apiKey, apiSecret);
+	const stream = createStreamServerClient(apiKey, apiSecret);
 	const userName = signedInUser.name || "Language learner";
 
 	await stream.upsertUsers([

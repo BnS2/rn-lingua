@@ -2,7 +2,15 @@ import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { useMemo } from "react";
-import { ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import {
+	Alert,
+	ScrollView,
+	StatusBar,
+	StyleSheet,
+	Text,
+	TouchableOpacity,
+	View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { images } from "@/constants/images";
 import { getLessonArtworkSource } from "@/constants/lesson-artwork";
@@ -12,20 +20,19 @@ import { useLanguageStore } from "@/store/languageStore";
 import { useProgressStore } from "@/store/progressStore";
 import type { LearningLesson } from "@/types/learning";
 
-const ACTIVE_LESSON_INDEX = 2;
-
 type LessonStatus = "completed" | "in-progress" | "not-started";
 
 function getLessonStatus(
 	lessonId: string,
 	index: number,
 	completedLessonIds: string[],
+	activeLessonIndex: number,
 ): LessonStatus {
-	if (completedLessonIds.includes(lessonId) || index < ACTIVE_LESSON_INDEX) {
+	if (completedLessonIds.includes(lessonId)) {
 		return "completed";
 	}
 
-	if (index === ACTIVE_LESSON_INDEX) {
+	if (index === activeLessonIndex) {
 		return "in-progress";
 	}
 
@@ -43,8 +50,10 @@ function getLessonArtwork(lesson: LearningLesson, status: LessonStatus) {
 export default function LearnScreen() {
 	const router = useRouter();
 	const selectedLanguageCode = useLanguageStore((state) => state.selectedLanguageCode);
-	const completedLessonIds = useProgressStore((state) => state.completedLessonIds);
 	const activeLanguageCode = selectedLanguageCode ?? "es";
+	const completedLessonIds = useProgressStore(
+		(state) => state.getProgressForLanguage(activeLanguageCode).completedLessonIds,
+	);
 
 	const currentUnit = useMemo(() => {
 		const units = getUnitsByLanguage(activeLanguageCode);
@@ -70,14 +79,40 @@ export default function LearnScreen() {
 		}, []);
 	}, [currentUnit]);
 
-	const activeLesson = lessons[ACTIVE_LESSON_INDEX] ?? lessons[0];
-	const completedCount = Math.min(ACTIVE_LESSON_INDEX, lessons.length);
+	const completedLessonIdSet = useMemo(() => new Set(completedLessonIds), [completedLessonIds]);
+	const activeLessonIndex = useMemo(() => {
+		const firstIncompleteIndex = lessons.findIndex(
+			(lesson) => !completedLessonIdSet.has(lesson.id),
+		);
+
+		if (firstIncompleteIndex >= 0) {
+			return firstIncompleteIndex;
+		}
+
+		return Math.max(lessons.length - 1, 0);
+	}, [completedLessonIdSet, lessons]);
+	const activeLesson = lessons[activeLessonIndex] ?? lessons[0];
+	const completedCount = lessons.filter((lesson) => completedLessonIdSet.has(lesson.id)).length;
 
 	const openLesson = (lessonId: string) => {
 		router.push({
 			pathname: "/lesson/[lessonId]",
 			params: { lessonId },
 		});
+	};
+
+	const showPracticeDemoMessage = () => {
+		Alert.alert(
+			"Practice",
+			"Practice mode is a demo placeholder for now. Lessons are the working flow in this version.",
+		);
+	};
+
+	const showBookmarkDemoMessage = () => {
+		Alert.alert(
+			"Bookmark",
+			"Bookmarking is a demo placeholder for now. Saved lessons will be wired up in a later lesson.",
+		);
 	};
 
 	return (
@@ -106,14 +141,20 @@ export default function LearnScreen() {
 						<View style={styles.headerText}>
 							<Text style={styles.title}>{activeLesson?.title ?? "Lessons"}</Text>
 							<Text style={styles.subtitle}>
-								Unit {Math.min(ACTIVE_LESSON_INDEX + 1, Math.max(lessons.length, 1))} •{" "}
-								{completedCount + 1} / {lessons.length || 1} lessons
+								Unit {Math.min(activeLessonIndex + 1, Math.max(lessons.length, 1))} •{" "}
+								{completedCount} / {lessons.length || 1} lessons
 							</Text>
 						</View>
 
-						<View style={styles.bookmark}>
+						<TouchableOpacity
+							accessibilityLabel="Bookmark lesson demo"
+							accessibilityRole="button"
+							activeOpacity={0.75}
+							style={styles.bookmark}
+							onPress={showBookmarkDemoMessage}
+						>
 							<Ionicons name="bookmark-outline" size={29} color="#6C4EF5" />
-						</View>
+						</TouchableOpacity>
 					</View>
 				</View>
 
@@ -121,9 +162,15 @@ export default function LearnScreen() {
 					<View style={styles.activeTab}>
 						<Text style={styles.activeTabText}>Lessons</Text>
 					</View>
-					<View style={styles.inactiveTab}>
+					<TouchableOpacity
+						activeOpacity={0.82}
+						accessibilityLabel="Practice demo"
+						accessibilityRole="button"
+						style={styles.inactiveTab}
+						onPress={showPracticeDemoMessage}
+					>
 						<Text style={styles.inactiveTabText}>Practice</Text>
-					</View>
+					</TouchableOpacity>
 				</View>
 
 				<View style={styles.lessonList}>
@@ -137,7 +184,7 @@ export default function LearnScreen() {
 					) : null}
 
 					{lessons.map((lesson, index) => {
-						const status = getLessonStatus(lesson.id, index, completedLessonIds);
+						const status = getLessonStatus(lesson.id, index, completedLessonIds, activeLessonIndex);
 						const isActive = status === "in-progress";
 
 						return (
@@ -203,16 +250,22 @@ const styles = StyleSheet.create({
 		right: 0,
 		bottom: 0,
 		left: 0,
-		height: 360,
+		height: 330,
 		width: "100%",
 	},
 	header: {
 		position: "absolute",
 		top: 20,
-		right: 24,
+		right: 19,
 		left: 18,
 		flexDirection: "row",
 		alignItems: "flex-start",
+		borderRadius: 22,
+		backgroundColor: "rgba(234, 246, 255, 0.96)",
+		paddingTop: 8,
+		paddingRight: 12,
+		paddingBottom: 10,
+		paddingLeft: 4,
 	},
 	backButton: {
 		width: 44,
@@ -222,8 +275,9 @@ const styles = StyleSheet.create({
 	},
 	headerText: {
 		flex: 1,
-		paddingTop: 3,
-		paddingLeft: 8,
+		paddingTop: 1,
+		paddingLeft: 7,
+		paddingRight: 8,
 	},
 	title: {
 		fontFamily: "Poppins-Bold",
@@ -243,6 +297,7 @@ const styles = StyleSheet.create({
 		height: 42,
 		alignItems: "center",
 		justifyContent: "center",
+		borderRadius: 14,
 	},
 	tabs: {
 		height: 80,

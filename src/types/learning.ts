@@ -42,6 +42,15 @@ export type LessonGoal = {
 	text: string;
 };
 
+export type LessonReview = {
+	ratings: {
+		speaking: string;
+		pronunciation: string;
+		grammar: string;
+	};
+	comments: string[];
+};
+
 export type BaseActivity = {
 	id: string;
 	kind: ActivityKind;

@@ -15,6 +15,17 @@ export type SignedInUser = {
 	image?: string;
 };
 
+export class ClerkAuthConfigError extends Error {
+	constructor() {
+		super("Clerk server auth is not configured. Add CLERK_SECRET_KEY or CLERK_JWT_KEY.");
+		this.name = "ClerkAuthConfigError";
+	}
+}
+
+export function isClerkAuthConfigError(error: unknown): error is ClerkAuthConfigError {
+	return error instanceof ClerkAuthConfigError;
+}
+
 function getBearerToken(request: Request) {
 	const authorization = request.headers.get("authorization");
 	return authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : null;
@@ -25,6 +36,10 @@ export async function getSignedInUser(request: Request): Promise<SignedInUser | 
 
 	if (!token) {
 		return null;
+	}
+
+	if (!process.env.CLERK_SECRET_KEY && !process.env.CLERK_JWT_KEY) {
+		throw new ClerkAuthConfigError();
 	}
 
 	try {
