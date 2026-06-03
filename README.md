@@ -21,6 +21,18 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 Client-safe values must use Expo's public prefix, for example `EXPO_PUBLIC_STREAM_API_KEY`.
 Keep `STREAM_API_SECRET` only in a server or serverless environment. Stream user tokens should be minted by a backend function, such as `createStreamUserToken` or an API route, and never embedded in the frontend environment.
 
+When running on a physical phone, the app must call the Expo dev server through a host your phone can resolve. The simplest setup is to use your Mac's Tailscale MagicDNS name:
+
+```bash
+EXPO_PUBLIC_TAILSCALE_MAGIC_DNS_HOST=your-mac.tailnet-name.ts.net
+```
+
+The app will use that host for local Expo API routes when Expo reports `localhost` or `127.0.0.1`. If you host API routes somewhere else, set the full override instead:
+
+```bash
+EXPO_PUBLIC_API_BASE_URL=http://your-mac.tailnet-name.ts.net:8081
+```
+
 In the output, you'll find options to open the app in a
 
 - [development build](https://docs.expo.dev/develop/development-builds/introduction/)

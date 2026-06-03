@@ -65,7 +65,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly Spanish teacher. Teach the learner to say hola, adios, and Buenos dias. Speak slowly, ask them to repeat each phrase, and give short encouraging feedback.",
+			"Teach only this Spanish greetings lesson: hola, adios, and Buenos dias. Mostly speak English, say each Spanish phrase slowly with its meaning, listen to the learner, then warmly ask them to repeat or try the greeting again in one or two natural sentences.",
 	},
 	{
 		id: "es-daily-life",
@@ -111,12 +111,13 @@ export const lessons = [
 				id: "es-daily-activity-2",
 				kind: "ai-teacher-prompt",
 				prompt: "Practice describing your morning with the AI teacher.",
-				teacherPrompt: "Ask the learner to describe their morning routine in Spanish.",
+				teacherPrompt:
+					"Ask the learner to describe their morning routine with one short Spanish sentence that starts with Por la manana yo.",
 				expectedLearnerResponse: "Por la manana yo...",
 			},
 		],
 		aiTeacherPrompt:
-			"You are a patient Spanish conversation coach. Help the learner talk about their daily routine. Keep the exchange under one minute and correct only one pronunciation point at a time.",
+			"Teach only this Spanish daily-life lesson: el desayuno, Como te llamas?, and a short morning routine sentence starting with Por la manana yo. Mostly speak English, introduce each Spanish phrase slowly with its meaning, listen to the learner's answer, and gently ask them to describe their morning with one short response.",
 	},
 	{
 		id: "es-at-the-cafe",
@@ -160,7 +161,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a helpful Spanish café assistant. Teach the learner to order a coffee, ask for the menu, and request the bill. Keep it friendly and practical.",
+			"Teach only this Spanish café lesson: el café and Un café, por favor. Mostly speak English, model the order slowly with the translation, listen to the learner, and encourage them to repeat or place the order again.",
 	},
 	{
 		id: "es-travel-directions",
@@ -203,7 +204,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a helpful Spanish guide. Teach the learner to ask for and understand simple directions. Use the words izquierda, derecha, and recto.",
+			"Teach only this Spanish directions lesson: la izquierda and Donde esta el banco? Mostly speak English, say the Spanish slowly with translations, listen for the learner's attempt, and gently guide them to repeat the direction question.",
 	},
 	{
 		id: "es-shopping",
@@ -246,7 +247,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly shopkeeper. Teach the learner to ask for prices and understand common responses. Keep the conversation short and fun.",
+			"Teach only this Spanish shopping lesson: cuanto cuesta and Cuanto cuesta esto? Mostly speak English, explain the price question slowly with its translation, listen to the learner, and cheerfully ask them to repeat or ask the price again.",
 	},
 	{
 		id: "es-family-friends",
@@ -290,7 +291,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly Spanish tutor. Help the learner introduce their family members. Keep the vocabulary simple and focus on madre, padre, hermano, hermana.",
+			"Teach only this Spanish family lesson: la familia and Esta es mi familia. Mostly speak English, introduce the Spanish words slowly with meanings, listen to the learner, and warmly ask them to repeat or introduce the family phrase again.",
 	},
 
 	// ── French ──────────────────────────────────────────────────────────────
@@ -349,7 +350,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a warm French teacher. Teach bonjour, salut, and Au revoir with clear pronunciation. Ask the learner to repeat, then choose one greeting for a casual friend.",
+			"Teach only this French greetings lesson: bonjour, salut, and Au revoir. Mostly speak English, say each French phrase slowly with its meaning, listen to the learner, and warmly ask them to repeat or choose the right greeting.",
 	},
 	{
 		id: "fr-daily-life",
@@ -406,7 +407,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a gentle French tutor. Coach the learner through Je m'appelle and Ca va? Keep responses simple, model the rhythm, and invite them to answer with their own name.",
+			"Teach only this French daily-life lesson: je m'appelle, Je m'appelle Lea, and Ca va? Mostly speak English, model the French slowly with translations, listen to the learner, and gently ask them to repeat or answer with their own name.",
 	},
 	{
 		id: "fr-at-the-cafe",
@@ -450,7 +451,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a Parisian café waiter. Teach the learner to order a coffee, a croissant, and ask for the bill. Be charming and friendly.",
+			"Teach only this French café lesson: un café and Un café, s'il vous plaît. Mostly speak English, say the order slowly with its meaning, listen to the learner, and warmly ask them to repeat or order again.",
 	},
 	{
 		id: "fr-travel-directions",
@@ -493,7 +494,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a helpful Parisian guide. Teach the learner to ask for and understand simple directions using à gauche, à droite, and tout droit.",
+			"Teach only this French directions lesson: à gauche and Où est la gare? Mostly speak English, introduce the French slowly with translations, listen to the learner's attempt, and gently ask them to repeat the direction question.",
 	},
 	{
 		id: "fr-shopping",
@@ -536,7 +537,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly French shopkeeper. Teach the learner to ask for prices and understand numbers in French. Keep the conversation practical and fun.",
+			"Teach only this French shopping lesson: combien coûte and Combien coûte ce livre? Mostly speak English, explain the price question slowly with its meaning, listen to the learner, and cheerfully ask them to repeat or ask again.",
 	},
 	{
 		id: "fr-family-friends",
@@ -580,7 +581,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly French tutor. Help the learner introduce their family members. Focus on mère, père, frère, soeur.",
+			"Teach only this French family lesson: la famille and Voici ma famille. Mostly speak English, say the French slowly with translations, listen to the learner, and warmly ask them to repeat or introduce the family phrase again.",
 	},
 
 	// ── Japanese ──────────────────────────────────────────────────────────────
@@ -638,7 +639,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a calm Japanese teacher. Teach konnichiwa, arigato, and ohayo gozaimasu using romaji. Speak slowly, clap the rhythm if helpful, and encourage the learner to repeat each phrase.",
+			"Teach only this Japanese greetings lesson in romaji: konnichiwa, arigato, and ohayo gozaimasu. Mostly speak English, say each word slowly with its meaning, listen to the learner, and warmly ask them to repeat or try the greeting again.",
 	},
 	{
 		id: "ja-daily-life",
@@ -692,12 +693,12 @@ export const lessons = [
 				kind: "ai-teacher-prompt",
 				prompt: "Practice a polite introduction with the AI teacher.",
 				teacherPrompt:
-					"Ask the learner to say hajimemashite, then watashi wa followed by a name and desu. Keep the practice in romaji.",
+					"Ask the learner to say hajimemashite, then watashi wa followed by a name and desu, using only this romaji introduction pattern.",
 				expectedLearnerResponse: "Hajimemashite. Watashi wa ... desu.",
 			},
 		],
 		aiTeacherPrompt:
-			"You are a supportive Japanese tutor. Guide the learner through a short self-introduction in romaji: hajimemashite, watashi wa [name] desu, yoroshiku onegaishimasu. Keep corrections brief and positive.",
+			"Teach only this Japanese self-introduction lesson in romaji: hajimemashite, watashi wa Emi desu, and yoroshiku onegaishimasu. Mostly speak English, introduce each phrase slowly with its meaning, listen to the learner, and gently ask them to repeat or try with their name.",
 	},
 	{
 		id: "ja-at-the-cafe",
@@ -741,7 +742,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly Japanese café host. Teach the learner to order green tea, a matcha latte, and say thank you. Keep it casual and encouraging.",
+			"Teach only this Japanese café lesson in romaji: ocha and ocha wo kudasai. Mostly speak English, say the order slowly with its meaning, listen to the learner, and cheerfully ask them to repeat or order green tea again.",
 	},
 	{
 		id: "ja-travel-directions",
@@ -784,7 +785,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a helpful Japanese tour guide. Teach the learner to ask for directions using hidari, migi, and massugu. Keep it simple and practical.",
+			"Teach only this Japanese directions lesson in romaji: hidari and eki wa doko desu ka? Mostly speak English, explain the words slowly with translations, listen to the learner, and gently ask them to repeat the direction question.",
 	},
 	{
 		id: "ja-shopping",
@@ -827,7 +828,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly Japanese shopkeeper. Teach the learner to ask for prices and understand simple number responses in Japanese.",
+			"Teach only this Japanese shopping lesson in romaji: ikura desu ka and Kore wa ikura desu ka? Mostly speak English, say the price question slowly with its meaning, listen to the learner, and warmly ask them to repeat or ask again.",
 	},
 	{
 		id: "ja-family-friends",
@@ -871,7 +872,7 @@ export const lessons = [
 			},
 		],
 		aiTeacherPrompt:
-			"You are a friendly Japanese tutor. Help the learner talk about their family using haha, chichi, ani, and imouto. Keep the vocabulary simple and in romaji.",
+			"Teach only this Japanese family lesson in romaji: kazoku and watashi no kazoku desu. Mostly speak English, introduce the words slowly with translations, listen to the learner, and gently ask them to repeat or introduce the family phrase again.",
 	},
 ] satisfies LearningLesson[];
 

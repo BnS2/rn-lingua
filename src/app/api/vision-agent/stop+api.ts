@@ -1,4 +1,4 @@
-import { getSignedInUser } from "@/lib/clerkAuth";
+import { getSignedInUser, isClerkAuthConfigError } from "@/lib/clerkAuth";
 
 type StopAgentRequest = {
 	callId?: string;
@@ -6,7 +6,13 @@ type StopAgentRequest = {
 };
 
 const agentServerUrl = process.env.VISION_AGENT_SERVER_URL ?? "http://localhost:8000";
-const agentRequestTimeoutMs = Number(process.env.VISION_AGENT_REQUEST_TIMEOUT_MS ?? 8000);
+
+function getAgentRequestTimeoutMs() {
+	const timeoutMs = Number(process.env.VISION_AGENT_REQUEST_TIMEOUT_MS);
+	return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30000;
+}
+
+const agentRequestTimeoutMs = getAgentRequestTimeoutMs();
 
 function jsonError(message: string, status: number) {
 	return Response.json({ error: message }, { status });
@@ -17,7 +23,17 @@ function isAbortError(error: unknown) {
 }
 
 export async function POST(request: Request) {
-	const signedInUser = await getSignedInUser(request);
+	let signedInUser;
+
+	try {
+		signedInUser = await getSignedInUser(request);
+	} catch (error) {
+		if (isClerkAuthConfigError(error)) {
+			return jsonError(error.message, 500);
+		}
+
+		throw error;
+	}
 
 	if (!signedInUser) {
 		return jsonError("Sign in before stopping the AI teacher.", 401);

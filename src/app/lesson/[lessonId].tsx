@@ -1,31 +1,39 @@
 import { useAuth, useUser } from "@clerk/expo";
 import { Ionicons } from "@expo/vector-icons";
-import {
-	type Call,
-	CallingState,
+import type {
+	Call,
+	CallClosedCaption,
+	CustomVideoEvent,
 	StreamVideoClient,
-	type TokenProvider,
-	type User,
+	TokenProvider,
+	User,
 } from "@stream-io/video-react-native-sdk";
+import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import {
+	ActivityIndicator,
+	Modal,
+	ScrollView,
+	StatusBar,
+	StyleSheet,
+	Text,
+	TouchableOpacity,
+	useWindowDimensions,
+	View,
+} from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { images } from "@/constants/images";
+import { getLessonArtworkSource } from "@/constants/lesson-artwork";
+import { sounds } from "@/constants/sounds";
 import { getLanguageByCode } from "@/data/languages";
 import { getLessonById } from "@/data/lessons";
 import { getApiUrl } from "@/lib/api";
 import { useLanguageStore } from "@/store/languageStore";
+import { useProgressStore } from "@/store/progressStore";
+import type { LessonReview, PhraseItem, VocabularyItem } from "@/types/learning";
 import type { StreamAudioCallSession } from "@/types/stream";
-
-type ControlButton = {
-	label: string;
-	icon: keyof typeof Ionicons.glyphMap;
-	variant?: "danger";
-	disabled?: boolean;
-	onPress: () => void;
-};
 
 type TabButton = {
 	label: string;
@@ -41,6 +49,25 @@ type TabButton = {
 
 type CallStatus = "idle" | "creating" | "connecting" | "joined" | "ended" | "error";
 type AgentConnectionStatus = "idle" | "connecting" | "connected" | "failed";
+type CaptionSpeakerKind = "teacher" | "learner" | "guest";
+type LiveCaption = CallClosedCaption & {
+	speakerKind: CaptionSpeakerKind;
+	speakerLabel: string;
+};
+type CaptionStatus = "started" | "ended" | "transcript";
+type CaptionRow = {
+	id: string;
+	speakerKind: CaptionSpeakerKind;
+	speakerLabel: string;
+	text: string;
+	isInterim: boolean;
+};
+type TeacherTargetItem = PhraseItem | VocabularyItem;
+type AudioLessonTargetEvent = {
+	targetItemId: string;
+	targetIndex: number;
+	targetCount: number;
+};
 
 type VisionAgentSession = {
 	session_id: string;
@@ -61,9 +88,319 @@ const tabs: TabButton[] = [
 	{ label: "Profile", icon: "person-outline", activeIcon: "person", href: "/(tabs)/profile" },
 ];
 
+const fallbackLessonReview: LessonReview = {
+	ratings: {
+		speaking: "Try again",
+		pronunciation: "0 items",
+		grammar: "Speak aloud",
+	},
+	comments: [
+		"No spoken attempt was captured before the lesson ended.",
+		"Try again and repeat each lesson item out loud.",
+	],
+};
+
+const emptyCompletedLessonIds: string[] = [];
+const teacherResponseTimeoutMs = 10_000;
+const audioPermissionHydrationTimeoutMs = 4_000;
+const pushToTalkReleaseTailMs = 900;
+const learnerListeningCaption = "Listening to you...";
+const callingStateLeft = "left";
+const webRtcUnavailableMessage =
+	"Live audio lessons use Stream WebRTC, which is not included in Expo Go. Run this app in a development build with `npm run ios` or `npm run android`.";
+
+let streamVideoSdkPromise: Promise<typeof import("@stream-io/video-react-native-sdk")> | undefined;
+
+function loadStreamVideoSdk() {
+	streamVideoSdkPromise ??= import("@stream-io/video-react-native-sdk");
+	return streamVideoSdkPromise;
+}
+
+function getStreamVideoErrorMessage(error: unknown) {
+	const message = error instanceof Error ? error.message : "";
+
+	if (message.toLowerCase().includes("webrtc") || message.toLowerCase().includes("native module")) {
+		return webRtcUnavailableMessage;
+	}
+
+	return error instanceof Error ? error.message : "Unable to join the audio lesson.";
+}
+
+function normalizeLessonSpeechText(text: string) {
+	return text
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/[.,/#!$%^&*;:{}=\-_`~()¿?¡!]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function compactLessonSpeechText(text: string) {
+	return normalizeLessonSpeechText(text).replace(/\s+/g, "");
+}
+
+function getSpeechMatchTerms(text: string) {
+	const normalizedText = normalizeLessonSpeechText(text);
+	const compactText = compactLessonSpeechText(text);
+	const noSilentHText = compactText.replaceAll("h", "");
+	const softVText = noSilentHText.replaceAll("v", "b");
+
+	return [normalizedText, compactText, noSilentHText, softVText].filter(
+		(term, index, terms) => term.length > 0 && terms.indexOf(term) === index,
+	);
+}
+
+function getTargetItemTerms(item: TeacherTargetItem) {
+	const originalText = "term" in item ? item.term : item.text;
+	const baseText = originalText.split(" ");
+	const withoutShortArticle =
+		baseText.length > 1 && baseText[0].length <= 3 ? baseText.slice(1).join(" ") : originalText;
+
+	return [originalText, withoutShortArticle, item.pronunciation, item.translation]
+		.flatMap(getSpeechMatchTerms)
+		.filter((term, index, terms) => terms.indexOf(term) === index);
+}
+
+function findTeacherTargetItem(
+	spokenText: string,
+	items: TeacherTargetItem[],
+): TeacherTargetItem | null {
+	const speechNormalized = normalizeLessonSpeechText(spokenText);
+
+	if (!speechNormalized) {
+		return null;
+	}
+
+	const speechCompact = compactLessonSpeechText(spokenText);
+	let bestMatch: TeacherTargetItem | null = null;
+	let highestIndex = -1;
+
+	for (const item of items) {
+		for (const term of getTargetItemTerms(item)) {
+			const index = term.includes(" ")
+				? speechNormalized.lastIndexOf(term)
+				: speechCompact.lastIndexOf(term);
+
+			if (index > highestIndex) {
+				highestIndex = index;
+				bestMatch = item;
+			}
+		}
+	}
+
+	return bestMatch;
+}
+
+function getTargetItemIndex(spokenText: string, items: TeacherTargetItem[]) {
+	const targetItem = findTeacherTargetItem(spokenText, items);
+
+	if (!targetItem) {
+		return -1;
+	}
+
+	return items.findIndex(
+		(item) => getTeacherTargetItemId(item) === getTeacherTargetItemId(targetItem),
+	);
+}
+
+function getCaptionSpeakerKind(caption: CallClosedCaption, currentUserId?: string | null) {
+	if (caption.speaker_id === "ai-language-teacher" || caption.user.id === "ai-language-teacher") {
+		return "teacher";
+	}
+
+	if (caption.speaker_id === currentUserId || caption.user.id === currentUserId) {
+		return "learner";
+	}
+
+	return "guest";
+}
+
+function toLiveCaption(caption: CallClosedCaption, currentUserId?: string | null): LiveCaption {
+	const speakerKind = getCaptionSpeakerKind(caption, currentUserId);
+	const fallbackName = caption.user.name || caption.speaker_id;
+	const speakerLabel =
+		speakerKind === "teacher" ? "AI Teacher" : speakerKind === "learner" ? "You" : fallbackName;
+
+	return {
+		...caption,
+		speakerKind,
+		speakerLabel,
+	};
+}
+
+function getCaptionSpeakerLabel(speakerKind: CaptionSpeakerKind) {
+	return speakerKind === "teacher" ? "AI Teacher" : speakerKind === "learner" ? "You" : "Guest";
+}
+
+function getInterimCaptionText(speakerKind: CaptionSpeakerKind) {
+	return speakerKind === "teacher"
+		? "AI Teacher is speaking..."
+		: speakerKind === "learner"
+			? "Listening to you..."
+			: "Listening...";
+}
+
+function isCaptionSpeakerKind(value: unknown): value is CaptionSpeakerKind {
+	return value === "teacher" || value === "learner" || value === "guest";
+}
+
+function isCaptionStatus(value: unknown): value is CaptionStatus {
+	return value === "started" || value === "ended" || value === "transcript";
+}
+
+function parseNumericEventValue(value: unknown) {
+	if (typeof value === "number" && Number.isFinite(value)) {
+		return value;
+	}
+
+	if (typeof value === "string") {
+		const numericValue = Number(value);
+		return Number.isFinite(numericValue) ? numericValue : null;
+	}
+
+	return null;
+}
+
+function parseAudioLessonCaptionEvent(event: CustomVideoEvent) {
+	const custom = event.custom;
+
+	if (custom.kind !== "audio_lesson_caption_status") {
+		return null;
+	}
+
+	if (!isCaptionSpeakerKind(custom.speaker) || !isCaptionStatus(custom.status)) {
+		return null;
+	}
+
+	return {
+		speakerKind: custom.speaker,
+		status: custom.status,
+		text: typeof custom.text === "string" ? custom.text : undefined,
+	};
+}
+
+function parseAudioLessonFinishReviewEvent(event: CustomVideoEvent): LessonReview | null {
+	const custom = event.custom;
+
+	if (custom.kind !== "audio_lesson_completed" && custom.kind !== "audio_lesson_ready_to_finish") {
+		return null;
+	}
+
+	const ratings = custom.ratings;
+	const comments = custom.comments;
+
+	return {
+		ratings: {
+			speaking:
+				typeof ratings === "object" &&
+				ratings !== null &&
+				"speaking" in ratings &&
+				typeof ratings.speaking === "string"
+					? ratings.speaking
+					: "Try again",
+			pronunciation:
+				typeof ratings === "object" &&
+				ratings !== null &&
+				"pronunciation" in ratings &&
+				typeof ratings.pronunciation === "string"
+					? ratings.pronunciation
+					: "0 items",
+			grammar:
+				typeof ratings === "object" &&
+				ratings !== null &&
+				"grammar" in ratings &&
+				typeof ratings.grammar === "string"
+					? ratings.grammar
+					: "Speak aloud",
+		},
+		comments: Array.isArray(comments)
+			? comments.filter((comment): comment is string => typeof comment === "string").slice(0, 2)
+			: fallbackLessonReview.comments,
+	};
+}
+
+function parseAudioLessonTargetEvent(event: CustomVideoEvent): AudioLessonTargetEvent | null {
+	const custom = event.custom;
+	const targetIndex = parseNumericEventValue(custom.targetIndex);
+	const targetCount = parseNumericEventValue(custom.targetCount);
+
+	if (custom.kind !== "audio_lesson_target") {
+		return null;
+	}
+
+	if (typeof custom.targetItemId !== "string" || targetIndex === null || targetCount === null) {
+		return null;
+	}
+
+	return {
+		targetItemId: custom.targetItemId,
+		targetIndex,
+		targetCount,
+	};
+}
+
+function formatLessonTextForReading(text: string, pronunciation?: string) {
+	if (!pronunciation || pronunciation.trim().toLowerCase() === text.trim().toLowerCase()) {
+		return text;
+	}
+
+	return `${pronunciation} (${text})`;
+}
+
+function getTeacherTargetItemId(item: TeacherTargetItem) {
+	return item.id;
+}
+
+function buildHonestLessonReview(
+	learnerAttemptCount: number,
+	completedTargetCount: number,
+	targetCount: number,
+): LessonReview {
+	const coveredTargetCount = targetCount > 0 ? Math.min(completedTargetCount, targetCount) : 0;
+	const attemptedEveryTarget = targetCount > 0 && coveredTargetCount >= targetCount;
+	const spokeEnoughForPractice =
+		learnerAttemptCount >= Math.max(1, Math.min(targetCount || 1, coveredTargetCount || 1));
+
+	if (learnerAttemptCount === 0) {
+		return fallbackLessonReview;
+	}
+
+	return {
+		ratings: {
+			speaking: `${learnerAttemptCount} attempt${learnerAttemptCount === 1 ? "" : "s"}`,
+			pronunciation: `${coveredTargetCount}/${targetCount || 1} items`,
+			grammar: attemptedEveryTarget
+				? "Review anytime"
+				: spokeEnoughForPractice
+					? "Keep practicing"
+					: "Repeat aloud",
+		},
+		comments: [
+			attemptedEveryTarget
+				? `You practiced all ${targetCount} lesson item${targetCount === 1 ? "" : "s"}.`
+				: `You reached ${coveredTargetCount} of ${targetCount || 1} lesson item${
+						targetCount === 1 ? "" : "s"
+					}.`,
+			spokeEnoughForPractice
+				? "You can finish now or repeat one more time for extra confidence."
+				: "Repeat the current word or phrase once more before finishing.",
+		],
+	};
+}
+
+function getLessonReviewInsightCards(review: LessonReview) {
+	return [
+		{ label: "Speaking", value: review.ratings.speaking, color: "#19CC33" },
+		{ label: "Practice", value: review.ratings.pronunciation, color: "#168BFF" },
+		{ label: "Focus", value: review.ratings.grammar, color: "#654BFF" },
+	];
+}
+
 export default function AudioLessonScreen() {
 	const router = useRouter();
 	const insets = useSafeAreaInsets();
+	const { height: windowHeight } = useWindowDimensions();
 	const { getToken, isLoaded: isAuthLoaded, userId } = useAuth();
 	const { user } = useUser();
 	const { lessonId } = useLocalSearchParams<{ lessonId: string }>();
@@ -74,29 +411,247 @@ export default function AudioLessonScreen() {
 			? selectedLanguageCode
 			: lesson?.languageCode;
 	const language = activeLanguageCode ? getLanguageByCode(activeLanguageCode) : undefined;
+	const completedLessonIds = useProgressStore((state) =>
+		lesson
+			? state.getProgressForLanguage(lesson.languageCode).completedLessonIds
+			: emptyCompletedLessonIds,
+	);
+	const completedLessonRecord = useProgressStore((state) =>
+		lesson
+			? state.getProgressForLanguage(lesson.languageCode).completedLessonsById[lesson.id]
+			: null,
+	);
+	const markLessonCompleted = useProgressStore((state) => state.markLessonCompleted);
 	const [activeCall, setActiveCall] = useState<Call | null>(null);
 	const [callStatus, setCallStatus] = useState<CallStatus>("idle");
 	const [callError, setCallError] = useState<string | null>(null);
 	const [agentStatus, setAgentStatus] = useState<AgentConnectionStatus>("idle");
 	const [agentError, setAgentError] = useState<string | null>(null);
 	const [agentSession, setAgentSession] = useState<VisionAgentSession | null>(null);
-	const [isCameraOn, setIsCameraOn] = useState(false);
-	const [isMuted, setIsMuted] = useState(false);
-	const [showSubtitles, setShowSubtitles] = useState(true);
+	const [captionError, setCaptionError] = useState<string | null>(null);
+	const [interimCaptionTextBySpeaker, setInterimCaptionTextBySpeaker] = useState<
+		Partial<Record<CaptionSpeakerKind, string>>
+	>({});
+	const [isTeacherTurnActive, setIsTeacherTurnActive] = useState(false);
+	const [hasTeacherCompletedTurn, setHasTeacherCompletedTurn] = useState(false);
+	const [latestTeacherSpeechText, setLatestTeacherSpeechText] = useState<string | null>(null);
+	const [isAwaitingTeacherResponse, setIsAwaitingTeacherResponse] = useState(false);
+	const [liveCaptions, setLiveCaptions] = useState<LiveCaption[]>([]);
+	const [lessonReview, setLessonReview] = useState<LessonReview | null>(null);
+	const [lessonReadyReview, setLessonReadyReview] = useState<LessonReview | null>(null);
+	const [isRetryingCompletedLesson, setIsRetryingCompletedLesson] = useState(false);
+	const [isMicOpen, setIsMicOpen] = useState(false);
+	const [isMicChanging, setIsMicChanging] = useState(false);
+	const [isMicReleasing, setIsMicReleasing] = useState(false);
+	const [canPublishAudio, setCanPublishAudio] = useState(true);
+	const [isLessonInfoVisible, setIsLessonInfoVisible] = useState(false);
 	const [streamClient, setStreamClient] = useState<StreamVideoClient | null>(null);
+
+	const [currentTargetIndex, setCurrentTargetIndex] = useState(0);
+	const [learnerAttemptCount, setLearnerAttemptCount] = useState(0);
+
 	const didAutoStartCall = useRef(false);
 	const activeCallRef = useRef<Call | null>(null);
 	const agentSessionRef = useRef<VisionAgentSession | null>(null);
 	const getTokenRef = useRef(getToken);
 	const isMountedRef = useRef(false);
+	const shouldCloseMicAfterOpenRef = useRef(false);
+	const didFinishLessonRef = useRef(false);
+	const didRequestFinishLessonRef = useRef(false);
+	const audioPermissionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const releaseMicTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const streamClientRef = useRef<StreamVideoClient | null>(null);
+	const teacherLoadingSoundPlayer = useAudioPlayer(sounds.teacherLoadingChime);
 
 	const isBusy = callStatus === "creating" || callStatus === "connecting";
 	const isJoined = callStatus === "joined";
+	const isLessonCompleted = lesson ? completedLessonIds.includes(lesson.id) : false;
+	const teacherTargetItems = useMemo<TeacherTargetItem[]>(
+		() => (lesson ? [...lesson.vocabulary, ...lesson.phrases] : []),
+		[lesson],
+	);
+	const targetCount = teacherTargetItems.length;
+	const [maxTargetIndex, setMaxTargetIndex] = useState(0);
+	const highestTargetIndex = Math.max(currentTargetIndex, maxTargetIndex);
+	const clampedTargetIndex =
+		targetCount > 0 ? Math.min(Math.max(highestTargetIndex, 0), targetCount - 1) : 0;
+	const displayTargetItem = teacherTargetItems[clampedTargetIndex] ?? null;
+	const displayTargetIndex = displayTargetItem ? clampedTargetIndex : currentTargetIndex;
+	const displayTargetNumber =
+		targetCount > 0 ? Math.min(Math.max(displayTargetIndex, 0) + 1, targetCount) : 0;
+	const lessonProgressPercent =
+		targetCount > 0 ? Math.min((displayTargetNumber / targetCount) * 100, 100) : 0;
+	const storedLessonReview = completedLessonRecord?.review ?? null;
+	const shouldShowCompletedLessonView =
+		Boolean(lesson && isLessonCompleted && !isRetryingCompletedLesson) && !isBusy && !isJoined;
+	const shouldShowLessonReview = Boolean(
+		lesson &&
+			lessonReview &&
+			(!isLessonCompleted || isRetryingCompletedLesson) &&
+			!isBusy &&
+			!isJoined,
+	);
+	const isTeacherTalking = isTeacherTurnActive || Boolean(interimCaptionTextBySpeaker.teacher);
+	const isTeacherThinking = isAwaitingTeacherResponse && !isTeacherTalking;
+	const hasTeacherSpoken = hasTeacherCompletedTurn || latestTeacherSpeechText !== null;
+	const canUsePushToTalk =
+		isJoined &&
+		agentStatus === "connected" &&
+		hasTeacherSpoken &&
+		canPublishAudio &&
+		!isTeacherTalking &&
+		!isTeacherThinking &&
+		!isMicChanging &&
+		!isMicReleasing;
+	const isReadyToFinishByProgress =
+		targetCount > 0 &&
+		displayTargetNumber >= targetCount &&
+		learnerAttemptCount > 0 &&
+		hasTeacherCompletedTurn;
+	const inferredLessonReadyReview = useMemo(
+		() =>
+			isReadyToFinishByProgress
+				? buildHonestLessonReview(learnerAttemptCount, displayTargetNumber, targetCount)
+				: null,
+		[displayTargetNumber, isReadyToFinishByProgress, learnerAttemptCount, targetCount],
+	);
+	const activeLessonReadyReview = lessonReadyReview ?? inferredLessonReadyReview;
+	const progressAttemptLabel =
+		learnerAttemptCount > 0
+			? `${learnerAttemptCount} ${learnerAttemptCount === 1 ? "try" : "tries"}`
+			: "";
+	const shouldShowReadyToFinishControls =
+		isJoined &&
+		agentStatus === "connected" &&
+		hasTeacherCompletedTurn &&
+		Boolean(activeLessonReadyReview) &&
+		isReadyToFinishByProgress &&
+		!isMicOpen &&
+		!isMicChanging &&
+		!isTeacherTalking &&
+		!isTeacherThinking;
+	const teacherStageHeight = Math.max(
+		430,
+		Math.min(590, windowHeight - insets.top - insets.bottom - 188),
+	);
+	const isCompactLessonView = teacherStageHeight < 520;
+	const captionRows = useMemo<CaptionRow[]>(() => {
+		const liveSpeakerKinds = new Set(liveCaptions.map((caption) => caption.speakerKind));
+		const mergedInterims = {
+			...interimCaptionTextBySpeaker,
+			...(isMicOpen
+				? { learner: interimCaptionTextBySpeaker.learner ?? learnerListeningCaption }
+				: null),
+		};
+		const rows = liveCaptions.map<CaptionRow>((caption) => ({
+			id: `${caption.speaker_id}-${caption.start_time}`,
+			speakerKind: caption.speakerKind,
+			speakerLabel: caption.speakerLabel,
+			text: caption.text,
+			isInterim: false,
+		}));
+
+		Object.entries(mergedInterims).forEach(([speakerKind, text]) => {
+			if (!isCaptionSpeakerKind(speakerKind) || !text || liveSpeakerKinds.has(speakerKind)) {
+				return;
+			}
+
+			rows.push({
+				id: `interim-${speakerKind}`,
+				speakerKind,
+				speakerLabel: getCaptionSpeakerLabel(speakerKind),
+				text,
+				isInterim: true,
+			});
+		});
+
+		return rows;
+	}, [interimCaptionTextBySpeaker, isMicOpen, liveCaptions]);
+
+	const formatCaptionForReading = useCallback(
+		(text: string) => {
+			if (!lesson) {
+				return text;
+			}
+
+			return [...lesson.phrases, ...lesson.vocabulary].reduce((captionText, item) => {
+				const originalText = "text" in item ? item.text : item.term;
+				const readableText = formatLessonTextForReading(originalText, item.pronunciation);
+
+				if (readableText === originalText || !captionText.includes(originalText)) {
+					return captionText;
+				}
+
+				return captionText.replaceAll(originalText, readableText);
+			}, text);
+		},
+		[lesson],
+	);
+
+	const updateCurrentTargetIndex = useCallback((targetIndex: number) => {
+		setCurrentTargetIndex(targetIndex);
+		setMaxTargetIndex((currentValue) => Math.max(currentValue, targetIndex));
+	}, []);
+
+	const syncTargetFromLessonText = useCallback(
+		(text: string) => {
+			const targetIndex = getTargetItemIndex(text, teacherTargetItems);
+
+			if (targetIndex >= 0) {
+				updateCurrentTargetIndex(targetIndex);
+			}
+
+			return targetIndex;
+		},
+		[teacherTargetItems, updateCurrentTargetIndex],
+	);
 
 	useEffect(() => {
 		getTokenRef.current = getToken;
 	}, [getToken]);
+
+	useEffect(() => {
+		setAudioModeAsync({
+			playsInSilentMode: true,
+			interruptionMode: "mixWithOthers",
+		}).catch((error) => {
+			console.warn("Failed to configure lesson sound effects:", error);
+		});
+	}, []);
+
+	const playTeacherTurnEndedSound = useCallback(() => {
+		teacherLoadingSoundPlayer
+			.seekTo(0)
+			.then(() => {
+				teacherLoadingSoundPlayer.play();
+			})
+			.catch((error) => {
+				console.warn("Failed to play teacher loading sound:", error);
+			});
+	}, [teacherLoadingSoundPlayer]);
+
+	useEffect(() => {
+		if (!isTeacherThinking) {
+			return;
+		}
+
+		const timeout = setTimeout(() => {
+			if (!isMountedRef.current) {
+				return;
+			}
+
+			setIsAwaitingTeacherResponse(false);
+			setHasTeacherCompletedTurn(true);
+			setInterimCaptionTextBySpeaker((currentValue) => {
+				const { learner: _learnerCaption, ...nextValue } = currentValue;
+				return nextValue;
+			});
+		}, teacherResponseTimeoutMs);
+
+		return () => {
+			clearTimeout(timeout);
+		};
+	}, [isTeacherThinking, setInterimCaptionTextBySpeaker]);
 
 	useEffect(() => {
 		agentSessionRef.current = agentSession;
@@ -147,14 +702,19 @@ export default function AudioLessonScreen() {
 				setAgentError(error instanceof Error ? error.message : "Unable to stop the AI teacher.");
 			}
 		}
-	}, []);
+	}, [setAgentError, setAgentSession, setAgentStatus]);
 
 	const cleanupLessonResources = useCallback(async () => {
+		if (releaseMicTimeoutRef.current) {
+			clearTimeout(releaseMicTimeoutRef.current);
+			releaseMicTimeoutRef.current = null;
+		}
+
 		await stopAgentSession();
 
 		const currentCall = activeCallRef.current;
 
-		if (currentCall?.state.callingState !== CallingState.LEFT) {
+		if (currentCall?.state.callingState !== callingStateLeft) {
 			try {
 				await currentCall?.leave();
 			} catch (error) {
@@ -163,6 +723,18 @@ export default function AudioLessonScreen() {
 		}
 
 		activeCallRef.current = null;
+		setLiveCaptions([]);
+		setIsTeacherTurnActive(false);
+		setHasTeacherCompletedTurn(false);
+		setLatestTeacherSpeechText(null);
+		setIsAwaitingTeacherResponse(false);
+		setIsMicReleasing(false);
+		setCaptionError(null);
+		setInterimCaptionTextBySpeaker({});
+		setCurrentTargetIndex(0);
+		setMaxTargetIndex(0);
+		setLessonReadyReview(null);
+		setCanPublishAudio(true);
 
 		const currentClient = streamClientRef.current;
 
@@ -175,7 +747,7 @@ export default function AudioLessonScreen() {
 		}
 
 		streamClientRef.current = null;
-	}, [stopAgentSession]);
+	}, [setCaptionError, setInterimCaptionTextBySpeaker, setLiveCaptions, stopAgentSession]);
 
 	useEffect(() => {
 		isMountedRef.current = true;
@@ -258,11 +830,12 @@ export default function AudioLessonScreen() {
 	}, [getToken]);
 
 	const getLessonStreamClient = useCallback(
-		(session: StreamAudioCallSession) => {
+		async (session: StreamAudioCallSession) => {
 			if (streamClient) {
 				return streamClient;
 			}
 
+			const { StreamVideoClient } = await loadStreamVideoSdk();
 			const streamUser: User = {
 				id: session.userId,
 				name: session.userName,
@@ -280,7 +853,7 @@ export default function AudioLessonScreen() {
 			streamClientRef.current = client;
 			return client;
 		},
-		[requestStreamToken, streamClient],
+		[requestStreamToken, setStreamClient, streamClient],
 	);
 
 	const startAgentSession = useCallback(
@@ -321,7 +894,7 @@ export default function AudioLessonScreen() {
 
 				if (
 					!isMountedRef.current ||
-					activeCallRef.current?.state.callingState === CallingState.LEFT
+					activeCallRef.current?.state.callingState === callingStateLeft
 				) {
 					await fetch(getApiUrl("/api/vision-agent/stop"), {
 						method: "POST",
@@ -345,7 +918,37 @@ export default function AudioLessonScreen() {
 				setAgentError(error instanceof Error ? error.message : "Unable to connect the AI teacher.");
 			}
 		},
-		[getToken],
+		[getToken, setAgentError, setAgentSession, setAgentStatus],
+	);
+
+	const startLiveCaptions = useCallback(
+		async (call: Call) => {
+			setCaptionError(null);
+			call.updateClosedCaptionSettings({
+				visibilityDurationMs: 5200,
+				maxVisibleCaptions: 3,
+			});
+
+			if (call.state.captioning) {
+				return;
+			}
+
+			try {
+				await call.startClosedCaptions({
+					language: "auto",
+					speech_segment_config: {
+						max_speech_caption_ms: 5000,
+						silence_duration_ms: 300,
+					},
+				});
+			} catch (error) {
+				console.warn("Failed to start Stream closed captions:", error);
+				setCaptionError(
+					"Live captions are not available yet. Enable closed captions for this Stream call type.",
+				);
+			}
+		},
+		[setCaptionError],
 	);
 
 	const startOrJoinCall = useCallback(async () => {
@@ -355,10 +958,21 @@ export default function AudioLessonScreen() {
 
 		setCallStatus("creating");
 		setCallError(null);
+		didFinishLessonRef.current = false;
+		setCurrentTargetIndex(0);
+		setMaxTargetIndex(0);
+		setLearnerAttemptCount(0);
+		setIsTeacherTurnActive(false);
+		setHasTeacherCompletedTurn(false);
+		setLatestTeacherSpeechText(null);
+		setIsAwaitingTeacherResponse(false);
+		setInterimCaptionTextBySpeaker({});
+		setLessonReadyReview(null);
+		setCanPublishAudio(true);
 
 		try {
 			const session = await requestCallSession();
-			const streamClient = getLessonStreamClient(session);
+			const streamClient = await getLessonStreamClient(session);
 			setCallStatus("connecting");
 
 			const call = streamClient.call(session.callType, session.callId, { reuseInstance: true });
@@ -368,93 +982,450 @@ export default function AudioLessonScreen() {
 
 			await call.join({ create: true });
 			await call.camera.disable();
-			await call.microphone.enable();
+			await call.microphone.disable();
+			await startLiveCaptions(call);
 
-			setIsCameraOn(false);
-			setIsMuted(false);
+			setIsMicOpen(false);
+			setIsMicReleasing(false);
 			setCallStatus("joined");
 			await startAgentSession(session);
 			didAutoStartCall.current = true;
 		} catch (error) {
 			didAutoStartCall.current = false;
 			setCallStatus("error");
-			setCallError(error instanceof Error ? error.message : "Unable to join the audio lesson.");
+			setCallError(getStreamVideoErrorMessage(error));
 		}
-	}, [getLessonStreamClient, isBusy, isJoined, requestCallSession, startAgentSession]);
+	}, [
+		getLessonStreamClient,
+		isBusy,
+		isJoined,
+		requestCallSession,
+		setActiveCall,
+		setCallError,
+		setCallStatus,
+		setCurrentTargetIndex,
+		setIsMicOpen,
+		startAgentSession,
+		startLiveCaptions,
+	]);
 
 	useEffect(() => {
-		if (didAutoStartCall.current || !lesson || !language || !isAuthLoaded || !userId) {
+		if (
+			didAutoStartCall.current ||
+			!lesson ||
+			!language ||
+			!isAuthLoaded ||
+			!userId ||
+			lessonReview ||
+			(isLessonCompleted && !isRetryingCompletedLesson)
+		) {
 			return;
 		}
 
 		startOrJoinCall();
-	}, [isAuthLoaded, language, lesson, startOrJoinCall, userId]);
+	}, [
+		isAuthLoaded,
+		isLessonCompleted,
+		isRetryingCompletedLesson,
+		language,
+		lesson,
+		lessonReview,
+		startOrJoinCall,
+		userId,
+	]);
 
-	const toggleCamera = useCallback(async () => {
-		if (!activeCall || !isJoined) {
+	const openPushToTalk = useCallback(async () => {
+		if (
+			!activeCall ||
+			!isJoined ||
+			!canPublishAudio ||
+			isMicOpen ||
+			isMicReleasing ||
+			agentStatus !== "connected" ||
+			isAwaitingTeacherResponse ||
+			interimCaptionTextBySpeaker.teacher
+		) {
 			return;
 		}
 
 		try {
-			if (isCameraOn) {
-				await activeCall.camera.disable();
-				setIsCameraOn(false);
+			shouldCloseMicAfterOpenRef.current = false;
+			setIsMicChanging(true);
+			await activeCall.microphone.enable();
+			if (shouldCloseMicAfterOpenRef.current) {
+				shouldCloseMicAfterOpenRef.current = false;
+				await activeCall.microphone.disable();
+				setIsMicOpen(false);
+				setIsMicReleasing(false);
+				return;
+			}
+			setIsMicOpen(true);
+		} catch (error) {
+			setCallError(error instanceof Error ? error.message : "Unable to open microphone.");
+		} finally {
+			setIsMicChanging(false);
+		}
+	}, [
+		activeCall,
+		agentStatus,
+		canPublishAudio,
+		interimCaptionTextBySpeaker.teacher,
+		isAwaitingTeacherResponse,
+		isJoined,
+		isMicOpen,
+		isMicReleasing,
+		setCallError,
+		setIsMicChanging,
+		setIsMicOpen,
+	]);
+
+	const closePushToTalk = useCallback(async () => {
+		if (isMicChanging) {
+			shouldCloseMicAfterOpenRef.current = true;
+			return;
+		}
+
+		if (!activeCall || !isJoined || !isMicOpen || isMicReleasing) {
+			return;
+		}
+
+		setIsMicOpen(false);
+		setIsMicReleasing(true);
+		setIsAwaitingTeacherResponse(true);
+
+		if (releaseMicTimeoutRef.current) {
+			clearTimeout(releaseMicTimeoutRef.current);
+		}
+
+		releaseMicTimeoutRef.current = setTimeout(() => {
+			releaseMicTimeoutRef.current = null;
+			activeCall.microphone
+				.disable()
+				.catch((error) => {
+					setCallError(error instanceof Error ? error.message : "Unable to close microphone.");
+				})
+				.finally(() => {
+					setIsMicReleasing(false);
+				});
+		}, pushToTalkReleaseTailMs);
+	}, [
+		activeCall,
+		isJoined,
+		isMicChanging,
+		isMicOpen,
+		isMicReleasing,
+		setCallError,
+		setIsAwaitingTeacherResponse,
+		setIsMicOpen,
+		setIsMicReleasing,
+	]);
+
+	const cancelAwaitingTeacherResponse = useCallback(() => {
+		setIsAwaitingTeacherResponse(false);
+		setHasTeacherCompletedTurn(true);
+		setInterimCaptionTextBySpeaker((currentValue) => {
+			const { learner: _learnerCaption, ...nextValue } = currentValue;
+			return nextValue;
+		});
+	}, [setHasTeacherCompletedTurn, setInterimCaptionTextBySpeaker, setIsAwaitingTeacherResponse]);
+
+	const finishTeachingSession = useCallback(
+		async (review?: LessonReview) => {
+			if (didFinishLessonRef.current) {
 				return;
 			}
 
-			await activeCall.camera.enable();
-			setIsCameraOn(true);
-		} catch (error) {
-			setCallError(error instanceof Error ? error.message : "Unable to update camera.");
-		}
-	}, [activeCall, isCameraOn, isJoined]);
+			const completedTargetCount = targetCount > 0 ? clampedTargetIndex + 1 : 0;
+			const nextReview =
+				review ?? buildHonestLessonReview(learnerAttemptCount, completedTargetCount, targetCount);
 
-	const toggleMute = useCallback(async () => {
-		if (!activeCall || !isJoined) {
-			return;
-		}
-
-		try {
-			if (isMuted) {
-				await activeCall.microphone.enable();
-				setIsMuted(false);
-				return;
-			}
-
-			await activeCall.microphone.disable();
-			setIsMuted(true);
-		} catch (error) {
-			setCallError(error instanceof Error ? error.message : "Unable to update microphone.");
-		}
-	}, [activeCall, isJoined, isMuted]);
-
-	const toggleSubtitles = useCallback(() => {
-		setShowSubtitles((currentValue) => !currentValue);
-	}, []);
-
-	const endCall = useCallback(async () => {
-		if (!activeCall) {
-			setCallStatus("ended");
-			router.replace("/(tabs)/learn");
-			return;
-		}
-
-		try {
-			await stopAgentSession();
-
-			if (activeCall.state.callingState !== CallingState.LEFT) {
-				await activeCall.leave();
-			}
+			didFinishLessonRef.current = true;
+			await cleanupLessonResources();
 			setActiveCall(null);
-			setIsCameraOn(false);
-			setIsMuted(false);
+			setStreamClient(null);
+			setIsMicOpen(false);
+			setIsMicReleasing(false);
+			setLessonReview(nextReview);
 			setCallStatus("ended");
-			router.replace("/(tabs)/learn");
-		} catch (error) {
-			setCallStatus("error");
-			setCallError(error instanceof Error ? error.message : "Unable to end the audio lesson.");
+		},
+		[
+			clampedTargetIndex,
+			cleanupLessonResources,
+			learnerAttemptCount,
+			setActiveCall,
+			setCallStatus,
+			setIsMicOpen,
+			setLessonReview,
+			setStreamClient,
+			targetCount,
+		],
+	);
+
+	useEffect(() => {
+		if (!activeCall) {
+			return;
 		}
-	}, [activeCall, router, stopAgentSession]);
+
+		const subscription = activeCall.state.ownCapabilities$.subscribe((ownCapabilities) => {
+			if (!isJoined) {
+				setCanPublishAudio(true);
+				return;
+			}
+
+			const nextCanPublishAudio = ownCapabilities.includes("send-audio");
+			setCanPublishAudio(nextCanPublishAudio);
+
+			if (nextCanPublishAudio) {
+				if (audioPermissionTimeoutRef.current) {
+					clearTimeout(audioPermissionTimeoutRef.current);
+					audioPermissionTimeoutRef.current = null;
+				}
+				return;
+			}
+
+			setIsMicOpen(false);
+			setIsMicReleasing(false);
+			if (audioPermissionTimeoutRef.current) {
+				return;
+			}
+
+			audioPermissionTimeoutRef.current = setTimeout(() => {
+				audioPermissionTimeoutRef.current = null;
+				setCallError(
+					"This lesson call cannot publish microphone audio yet. Please restart the lesson.",
+				);
+			}, audioPermissionHydrationTimeoutMs);
+		});
+
+		return () => {
+			if (audioPermissionTimeoutRef.current) {
+				clearTimeout(audioPermissionTimeoutRef.current);
+				audioPermissionTimeoutRef.current = null;
+			}
+			subscription.unsubscribe();
+		};
+	}, [activeCall, isJoined, setCallError, setIsMicOpen]);
+
+	useEffect(() => {
+		if (!activeCall) {
+			return;
+		}
+
+		const subscription = activeCall.state.closedCaptions$.subscribe((captions) => {
+			const nextCaptions = captions.map((caption) => toLiveCaption(caption, userId));
+			let highestMatchedTargetIndex = -1;
+
+			setLiveCaptions(nextCaptions);
+
+			for (const caption of nextCaptions) {
+				if (!caption.text.trim()) {
+					continue;
+				}
+
+				if (caption.speakerKind === "teacher") {
+					highestMatchedTargetIndex = Math.max(
+						highestMatchedTargetIndex,
+						getTargetItemIndex(caption.text, teacherTargetItems),
+					);
+					setLatestTeacherSpeechText(caption.text);
+					setIsAwaitingTeacherResponse(false);
+				}
+			}
+
+			if (highestMatchedTargetIndex >= 0) {
+				updateCurrentTargetIndex(highestMatchedTargetIndex);
+			}
+		});
+
+		return () => {
+			subscription.unsubscribe();
+		};
+	}, [activeCall, teacherTargetItems, updateCurrentTargetIndex, userId]);
+
+	useEffect(() => {
+		if (!activeCall) {
+			return;
+		}
+
+		const unsubscribe = activeCall.on("custom", (event) => {
+			const finishReview = parseAudioLessonFinishReviewEvent(event);
+
+			if (finishReview) {
+				setLessonReadyReview(finishReview);
+				setIsAwaitingTeacherResponse(false);
+				return;
+			}
+
+			const targetEvent = parseAudioLessonTargetEvent(event);
+
+			if (targetEvent) {
+				const targetIndex = teacherTargetItems.findIndex(
+					(item) => getTeacherTargetItemId(item) === targetEvent.targetItemId,
+				);
+
+				updateCurrentTargetIndex(
+					targetIndex >= 0
+						? targetIndex
+						: Math.min(targetEvent.targetIndex, Math.max(targetEvent.targetCount - 1, 0)),
+				);
+
+				return;
+			}
+
+			const captionEvent = parseAudioLessonCaptionEvent(event);
+
+			if (!captionEvent) {
+				return;
+			}
+
+			if (captionEvent.speakerKind === "teacher" && captionEvent.text && lesson) {
+				syncTargetFromLessonText(captionEvent.text);
+
+				setLatestTeacherSpeechText(captionEvent.text);
+				setIsAwaitingTeacherResponse(false);
+			}
+
+			if (captionEvent.speakerKind === "teacher" && captionEvent.status === "started") {
+				setIsTeacherTurnActive(true);
+				setIsAwaitingTeacherResponse(false);
+			}
+
+			if (captionEvent.speakerKind === "teacher" && captionEvent.status === "ended") {
+				setIsTeacherTurnActive(false);
+				setHasTeacherCompletedTurn(true);
+				playTeacherTurnEndedSound();
+			}
+
+			if (
+				captionEvent.speakerKind === "learner" &&
+				captionEvent.status === "transcript" &&
+				captionEvent.text?.trim()
+			) {
+				setLearnerAttemptCount((currentValue) => currentValue + 1);
+				setIsAwaitingTeacherResponse(true);
+			}
+
+			setInterimCaptionTextBySpeaker((currentValue) => {
+				if (captionEvent.status === "ended") {
+					if (
+						captionEvent.speakerKind === "learner" &&
+						currentValue.learner &&
+						currentValue.learner !== learnerListeningCaption
+					) {
+						return currentValue;
+					}
+
+					const { [captionEvent.speakerKind]: _endedSpeaker, ...nextValue } = currentValue;
+					return nextValue;
+				}
+
+				return {
+					...currentValue,
+					[captionEvent.speakerKind]:
+						captionEvent.text ?? getInterimCaptionText(captionEvent.speakerKind),
+				};
+			});
+		});
+
+		return unsubscribe;
+	}, [
+		activeCall,
+		finishTeachingSession,
+		lesson,
+		playTeacherTurnEndedSound,
+		setCallError,
+		setCallStatus,
+		syncTargetFromLessonText,
+		teacherTargetItems,
+		updateCurrentTargetIndex,
+	]);
+
+	useEffect(() => {
+		if (!activeCall) {
+			return;
+		}
+
+		const subscription = activeCall.state.callingState$.subscribe((nextCallingState) => {
+			if (
+				nextCallingState !== callingStateLeft ||
+				callStatus !== "joined" ||
+				agentStatus !== "connected" ||
+				!lessonReadyReview ||
+				!didRequestFinishLessonRef.current ||
+				didFinishLessonRef.current
+			) {
+				return;
+			}
+
+			finishTeachingSession(lessonReadyReview).catch((error) => {
+				setCallStatus("error");
+				setCallError(error instanceof Error ? error.message : "Unable to finish the audio lesson.");
+			});
+		});
+
+		return () => {
+			subscription.unsubscribe();
+		};
+	}, [
+		activeCall,
+		agentStatus,
+		callStatus,
+		finishTeachingSession,
+		lessonReadyReview,
+		setCallError,
+		setCallStatus,
+	]);
+
+	const completeReviewedLesson = useCallback(() => {
+		if (lesson && lessonReview) {
+			markLessonCompleted(lesson.languageCode, lesson.id, lesson.xpReward, lessonReview);
+		}
+		setIsRetryingCompletedLesson(false);
+		setCallStatus("ended");
+	}, [lesson, lessonReview, markLessonCompleted, setCallStatus, setIsRetryingCompletedLesson]);
+
+	const finishReadyLesson = useCallback(() => {
+		didRequestFinishLessonRef.current = true;
+		finishTeachingSession(activeLessonReadyReview ?? undefined).catch((error) => {
+			setCallStatus("error");
+			setCallError(error instanceof Error ? error.message : "Unable to finish the audio lesson.");
+		});
+	}, [activeLessonReadyReview, finishTeachingSession, setCallError, setCallStatus]);
+
+	const retryCompletedLesson = useCallback(() => {
+		didAutoStartCall.current = false;
+		didFinishLessonRef.current = false;
+		didRequestFinishLessonRef.current = false;
+		setCallStatus("idle");
+		setCallError(null);
+		setAgentStatus("idle");
+		setAgentError(null);
+		setCaptionError(null);
+		setInterimCaptionTextBySpeaker({});
+		setIsTeacherTurnActive(false);
+		setHasTeacherCompletedTurn(false);
+		setLatestTeacherSpeechText(null);
+		setIsAwaitingTeacherResponse(false);
+		setLiveCaptions([]);
+		setLessonReview(null);
+		setLessonReadyReview(null);
+		setIsRetryingCompletedLesson(true);
+		setIsMicReleasing(false);
+		setCanPublishAudio(true);
+		setCurrentTargetIndex(0);
+		setMaxTargetIndex(0);
+		setLearnerAttemptCount(0);
+	}, [
+		setAgentError,
+		setAgentStatus,
+		setCallError,
+		setCallStatus,
+		setCaptionError,
+		setInterimCaptionTextBySpeaker,
+		setIsRetryingCompletedLesson,
+		setLessonReview,
+		setLiveCaptions,
+	]);
 
 	if (!lesson) {
 		return (
@@ -478,12 +1449,258 @@ export default function AudioLessonScreen() {
 		);
 	}
 
-	const primaryGoal = lesson.goals[0]?.text ?? lesson.description;
-	const firstPhrase = lesson.phrases[0];
-	const secondPhrase = lesson.phrases[1];
-	const teacherBubbleTitle =
-		language?.code === "es" ? "Muy bien!" : language?.code === "fr" ? "Tres bien!" : "Great job!";
-	const activePhrase = firstPhrase?.text ?? lesson.title;
+	if (shouldShowLessonReview && lessonReview) {
+		return (
+			<SafeAreaView style={styles.safeArea}>
+				<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+				<View style={styles.reviewScreen}>
+					<View style={styles.reviewHero}>
+						<Image source={images.mascotWelcome} style={styles.reviewMascot} contentFit="contain" />
+						<View style={styles.reviewBadge}>
+							<Ionicons name="sparkles" size={28} color="#FFFFFF" />
+						</View>
+					</View>
+
+					<Text className="mt-6 text-center font-poppins-bold text-[28px] leading-[34px] text-neutral-primary">
+						Results & insights
+					</Text>
+					<Text className="mt-2 text-center font-poppins-medium text-[15px] leading-[22px] text-[#64708D]">
+						Your {lesson.title} practice is ready to finish.
+					</Text>
+
+					<View style={styles.feedbackCard}>
+						{getLessonReviewInsightCards(lessonReview).map((card, index) => (
+							<View key={card.label} className="flex-1 flex-row items-center">
+								<View style={styles.feedbackColumn}>
+									<Text
+										adjustsFontSizeToFit
+										className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary"
+										minimumFontScale={0.72}
+										numberOfLines={1}
+									>
+										{card.label}
+									</Text>
+									<Text
+										className="mt-2 text-center font-poppins-bold text-[15px] leading-[21px]"
+										style={{ color: card.color }}
+									>
+										{card.value}
+									</Text>
+								</View>
+								{index < 2 ? <View style={styles.feedbackDivider} /> : null}
+							</View>
+						))}
+					</View>
+
+					<View style={styles.reviewCommentCard}>
+						{lessonReview.comments.map((comment) => (
+							<View key={comment} className="flex-row items-start gap-3">
+								<Ionicons name="checkmark-circle" size={18} color="#21C16B" />
+								<Text className="flex-1 font-poppins-medium text-[13px] leading-[19px] text-[#58617E]">
+									{comment}
+								</Text>
+							</View>
+						))}
+					</View>
+
+					<TouchableOpacity
+						accessibilityLabel="Save lesson progress"
+						accessibilityRole="button"
+						activeOpacity={0.86}
+						style={styles.completedPrimaryButton}
+						onPress={completeReviewedLesson}
+					>
+						<Text className="font-poppins-bold text-[16px] text-white">Finish lesson</Text>
+					</TouchableOpacity>
+				</View>
+			</SafeAreaView>
+		);
+	}
+
+	if (shouldShowCompletedLessonView) {
+		const completedReview = storedLessonReview ?? lessonReview ?? fallbackLessonReview;
+
+		return (
+			<SafeAreaView style={styles.safeArea}>
+				<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+				<View style={styles.completedScreen}>
+					<TouchableOpacity
+						accessibilityLabel="Go back to lessons"
+						accessibilityRole="button"
+						activeOpacity={0.75}
+						style={styles.completedBackButton}
+						onPress={() => router.replace("/(tabs)/learn")}
+					>
+						<Ionicons name="chevron-back" size={34} color="#0D132B" />
+					</TouchableOpacity>
+
+					<View style={styles.completedHero}>
+						<Image
+							source={images.mascotWelcome}
+							style={styles.completedMascot}
+							contentFit="contain"
+						/>
+						<View style={styles.completedCheckBadge}>
+							<Ionicons name="checkmark" size={34} color="#FFFFFF" />
+						</View>
+					</View>
+
+					<Text className="mt-6 text-center font-poppins-bold text-[28px] leading-[34px] text-neutral-primary">
+						Results & insights
+					</Text>
+					<Text className="mt-2 text-center font-poppins-medium text-[15px] leading-[22px] text-[#64708D]">
+						{lesson.title} is saved in your progress.
+					</Text>
+					<View style={styles.feedbackCard}>
+						{getLessonReviewInsightCards(completedReview).map((card, index) => (
+							<View key={card.label} className="flex-1 flex-row items-center">
+								<View style={styles.feedbackColumn}>
+									<Text
+										adjustsFontSizeToFit
+										className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary"
+										minimumFontScale={0.72}
+										numberOfLines={1}
+									>
+										{card.label}
+									</Text>
+									<Text
+										className="mt-2 text-center font-poppins-bold text-[15px] leading-[21px]"
+										style={{ color: card.color }}
+									>
+										{card.value}
+									</Text>
+								</View>
+								{index < 2 ? <View style={styles.feedbackDivider} /> : null}
+							</View>
+						))}
+					</View>
+					<View style={styles.reviewCommentCard}>
+						{completedReview.comments.map((comment) => (
+							<View key={comment} className="flex-row items-start gap-3">
+								<Ionicons name="checkmark-circle" size={18} color="#21C16B" />
+								<Text className="flex-1 font-poppins-medium text-[13px] leading-[19px] text-[#58617E]">
+									{comment}
+								</Text>
+							</View>
+						))}
+					</View>
+					<View style={styles.completedRewardCard}>
+						<View>
+							<Text className="font-poppins-bold text-[14px] leading-[19px] text-neutral-primary">
+								XP earned
+							</Text>
+							<Text className="mt-1 font-poppins-medium text-[12px] leading-[17px] text-[#64708D]">
+								You can practice again anytime.
+							</Text>
+						</View>
+						<Text className="font-poppins-bold text-[30px] leading-[36px] text-lingua-purple">
+							+{lesson.xpReward}
+						</Text>
+					</View>
+					<TouchableOpacity
+						accessibilityLabel="Try lesson again"
+						accessibilityRole="button"
+						activeOpacity={0.86}
+						style={styles.completedPrimaryButton}
+						onPress={retryCompletedLesson}
+					>
+						<Text className="font-poppins-bold text-[16px] text-white">Try again</Text>
+					</TouchableOpacity>
+					<TouchableOpacity
+						accessibilityLabel="Back to lessons"
+						accessibilityRole="button"
+						activeOpacity={0.76}
+						style={styles.completedSecondaryButton}
+						onPress={() => router.replace("/(tabs)/learn")}
+					>
+						<Text className="font-poppins-bold text-[16px] text-lingua-purple">
+							Back to lessons
+						</Text>
+					</TouchableOpacity>
+				</View>
+			</SafeAreaView>
+		);
+	}
+
+	const isConnected = isJoined && agentStatus === "connected";
+	const teacherModeLabel = !isConnected
+		? agentStatus === "connecting" || callStatus === "connecting" || callStatus === "creating"
+			? "Awaiting teacher..."
+			: "Awaiting..."
+		: isTeacherTalking
+			? "Teacher: Speaking"
+			: isTeacherThinking
+				? "Teacher: Thinking"
+				: isMicOpen
+					? "Teacher: Listening"
+					: hasTeacherSpoken
+						? "Your turn"
+						: "Teacher: Ready";
+	const teacherModeIcon = !isConnected
+		? "hourglass-outline"
+		: isTeacherTalking
+			? "volume-high-outline"
+			: isTeacherThinking
+				? "sparkles-outline"
+				: isMicOpen
+					? "ear-outline"
+					: hasTeacherSpoken
+						? "mic-outline"
+						: "radio-outline";
+	const teacherModePillStyle = !isConnected
+		? { backgroundColor: "rgba(13, 19, 43, 0.4)", borderColor: "rgba(255, 255, 255, 0.4)" }
+		: isTeacherTalking
+			? { backgroundColor: "#6C4EF5", borderColor: "rgba(108, 78, 245, 0.1)" }
+			: isTeacherThinking
+				? { backgroundColor: "#FF8A00", borderColor: "rgba(255, 138, 0, 0.2)" }
+				: isMicOpen
+					? { backgroundColor: "#19CC33", borderColor: "rgba(25, 204, 51, 0.2)" }
+					: { backgroundColor: "rgba(13, 19, 43, 0.64)", borderColor: "rgba(255, 255, 255, 0.72)" };
+	const shouldShowTargetPractice = !activeLessonReadyReview;
+	const teacherBubbleText = activeLessonReadyReview
+		? "That wraps this practice."
+		: isTeacherThinking
+			? "Checking your pronunciation..."
+			: isTeacherTalking && !latestTeacherSpeechText
+				? "AI Teacher is speaking..."
+				: displayTargetItem
+					? "Say this out loud."
+					: null;
+	// Derive a human-readable label that reflects every possible button state
+	const pushToTalkLabel = isMicOpen
+		? "Release to stop"
+		: isTeacherThinking
+			? "Waiting..."
+			: isTeacherTalking
+				? "Listen first"
+				: isMicChanging
+					? "Please wait..."
+					: !hasTeacherSpoken && agentStatus === "connected"
+						? "Waiting..."
+						: !canPublishAudio && agentStatus === "connected"
+							? "Mic unavailable"
+							: agentStatus === "connected"
+								? "Hold to talk"
+								: agentStatus === "connecting"
+									? "Connecting..."
+									: "Not ready";
+	const pushToTalkSubLabel = isMicOpen
+		? "Mic is live — release when done speaking."
+		: isTeacherThinking
+			? "The teacher is getting ready to respond."
+			: isTeacherTalking
+				? "Your mic stays muted while the teacher speaks."
+				: !hasTeacherSpoken && agentStatus === "connected"
+					? "Listen for the teacher's first word."
+					: !canPublishAudio && agentStatus === "connected"
+						? "Restart the lesson to refresh microphone permission."
+						: canUsePushToTalk
+							? "Hold to speak. Release to send."
+							: "Wait for the teacher to finish.";
+	const pushToTalkHint =
+		canUsePushToTalk || isMicOpen
+			? "Hold to speak. Release to mute your microphone."
+			: "Wait until the AI teacher finishes before speaking again.";
 	const callStatusLabel =
 		callStatus === "creating"
 			? "Creating call"
@@ -520,47 +1737,14 @@ export default function AudioLessonScreen() {
 				: agentStatus === "failed"
 					? "#FF424B"
 					: "#A8AFBF";
-	const renderControl = (control: ControlButton) => {
-		const isDanger = control.variant === "danger";
-		const isDisabled = control.disabled;
-
-		return (
-			<View key={control.label} style={styles.controlItem}>
-				<TouchableOpacity
-					accessibilityLabel={control.label}
-					accessibilityRole="button"
-					accessibilityState={isDisabled ? { disabled: true } : undefined}
-					activeOpacity={0.82}
-					disabled={isDisabled}
-					style={[
-						styles.controlCircle,
-						isDanger && styles.dangerControlCircle,
-						isDisabled && styles.disabledControlCircle,
-					]}
-					onPress={control.onPress}
-				>
-					<Ionicons
-						name={control.icon}
-						size={isDanger ? 34 : 31}
-						color={isDanger ? "#FFFFFF" : "#06133D"}
-					/>
-				</TouchableOpacity>
-				<Text className="font-poppins-bold text-[14px] leading-[18px] text-white">
-					{control.label}
-				</Text>
-			</View>
-		);
-	};
+	const primaryGoal = lesson.goals[0]?.text ?? lesson.description;
+	const lessonArtworkSource = getLessonArtworkSource(lesson.id);
 
 	return (
 		<SafeAreaView style={styles.safeArea}>
 			<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
-			<ScrollView
-				contentContainerStyle={[styles.scrollContent, { paddingBottom: 112 + insets.bottom }]}
-				contentInsetAdjustmentBehavior="automatic"
-				showsVerticalScrollIndicator={false}
-			>
+			<View style={[styles.screenContent, { paddingBottom: 104 + insets.bottom }]}>
 				<View className="flex-row items-center pb-4 pt-2">
 					<TouchableOpacity
 						accessibilityLabel="Go back"
@@ -589,37 +1773,10 @@ export default function AudioLessonScreen() {
 							</Text>
 						</View>
 					</View>
-
-					<View className="flex-row items-center gap-3">
-						{[
-							{ label: "Video lesson", icon: "videocam" as const },
-							{ label: "Session minutes", text: String(lesson.estimatedMinutes * 2) },
-							{ label: "Notifications", icon: "notifications-outline" as const },
-						].map((item) => (
-							<TouchableOpacity
-								key={item.label}
-								accessibilityLabel={item.label}
-								accessibilityRole="button"
-								activeOpacity={0.82}
-								style={styles.headerAction}
-							>
-								{"icon" in item ? (
-									<Ionicons name={item.icon} size={25} color="#06133D" />
-								) : (
-									<Text
-										className="font-poppins-bold text-[21px] text-neutral-primary"
-										style={styles.headerActionText}
-									>
-										{item.text}
-									</Text>
-								)}
-							</TouchableOpacity>
-						))}
-					</View>
 				</View>
 
-				<View style={styles.teacherStage}>
-					<Image source={images.lessonCafeHero} style={styles.stageBackground} contentFit="cover" />
+				<View style={[styles.teacherStage, { height: teacherStageHeight }]}>
+					<Image source={lessonArtworkSource} style={styles.stageBackground} contentFit="cover" />
 					<View style={styles.stageOverlay} />
 
 					<View style={styles.lessonPill}>
@@ -631,36 +1788,165 @@ export default function AudioLessonScreen() {
 						</Text>
 					</View>
 
-					<View style={styles.previewCard}>
-						<Image source={images.mascotLogo} style={styles.previewMascot} contentFit="contain" />
-						<View style={styles.previewStatus}>
-							<Ionicons name="radio" size={13} color="#21C16B" />
-							<Text className="font-poppins-bold text-[10px] text-neutral-primary">
-								{isMuted ? "Muted" : "Audio"}
+					<View style={styles.lessonStatePanel}>
+						<View
+							className={`will-change-animation ${
+								isTeacherThinking || isTeacherTalking || isMicOpen ? "animate-pulse" : ""
+							}`}
+							style={[styles.lessonStatePill, teacherModePillStyle]}
+						>
+							<Ionicons name={teacherModeIcon} size={16} color="#FFFFFF" />
+							<Text className="font-poppins-bold text-[12px] leading-[16px] text-white">
+								{teacherModeLabel}
 							</Text>
 						</View>
+						{targetCount > 0 ? (
+							<View style={styles.lessonProgressPill}>
+								<View style={styles.lessonProgressMetaRow}>
+									<Text
+										className="font-poppins-bold text-[10px] leading-[14px] text-white"
+										numberOfLines={1}
+									>
+										Practice {displayTargetNumber}/{targetCount}
+									</Text>
+									{progressAttemptLabel ? (
+										<Text
+											className="font-poppins-bold text-[10px] leading-[14px] text-white/85"
+											numberOfLines={1}
+										>
+											{progressAttemptLabel}
+										</Text>
+									) : null}
+									<Ionicons name="flag-outline" size={13} color="#FFFFFF" />
+								</View>
+								<View style={styles.lessonProgressTrack}>
+									<View
+										style={[styles.lessonProgressFill, { width: `${lessonProgressPercent}%` }]}
+									/>
+								</View>
+							</View>
+						) : null}
 					</View>
 
-					<Image source={images.mascotWelcome} style={styles.teacherMascot} contentFit="contain" />
+					<Image
+						source={images.mascotWelcome}
+						style={[styles.teacherMascot, isCompactLessonView && styles.teacherMascotCompact]}
+						contentFit="contain"
+					/>
 
-					<View style={styles.responseBubble}>
-						<View className="flex-1">
-							<Text className="font-poppins-bold text-[24px] leading-[31px] text-neutral-primary">
-								{teacherBubbleTitle}
-							</Text>
-							<Text
-								className="mt-1 font-poppins-semibold text-[19px] leading-[25px] text-neutral-primary"
-								numberOfLines={1}
-							>
-								Say: {activePhrase}
-							</Text>
-							<Text className="mt-1 font-poppins-regular text-[12px] leading-[17px] text-[#64708D]">
-								{firstPhrase?.translation ?? lesson.aiTeacherPrompt}
-							</Text>
-						</View>
-						<Ionicons name="volume-high" size={35} color="#5B3BF6" />
-						<View style={styles.bubbleTail} />
-					</View>
+					{/* Keep the current target visible so the learner always knows what to say. */}
+					{teacherBubbleText || (shouldShowTargetPractice && displayTargetItem)
+						? (() => {
+								return (
+									<View
+										style={[
+											styles.responseBubble,
+											isCompactLessonView
+												? styles.responseBubbleCompact
+												: styles.responseBubbleRegular,
+										]}
+									>
+										<View className="flex-1">
+											<View className="gap-2.5">
+												{isTeacherThinking ? (
+													<Text className="font-poppins-semibold text-[16px] leading-[22px] text-[#7B849B]">
+														{teacherBubbleText}
+													</Text>
+												) : isTeacherTalking && !latestTeacherSpeechText ? (
+													<Text className="font-poppins-semibold text-[16px] leading-[22px] text-[#7B849B]">
+														{teacherBubbleText}
+													</Text>
+												) : latestTeacherSpeechText ? (
+													<Text className="font-poppins-semibold text-[15px] leading-[21px] text-neutral-primary">
+														{teacherBubbleText}
+													</Text>
+												) : (
+													<Text className="font-poppins-semibold text-[14px] leading-[20px] text-[#7B849B]">
+														Say this word out loud.
+													</Text>
+												)}
+
+												{shouldShowTargetPractice && displayTargetItem
+													? (() => {
+															const term =
+																"term" in displayTargetItem
+																	? displayTargetItem.term
+																	: displayTargetItem.text;
+															const pronunciation = displayTargetItem.pronunciation;
+															const translation = displayTargetItem.translation;
+															const partOfSpeech =
+																"partOfSpeech" in displayTargetItem &&
+																typeof displayTargetItem.partOfSpeech === "string"
+																	? displayTargetItem.partOfSpeech
+																	: null;
+															const example =
+																"example" in displayTargetItem &&
+																typeof displayTargetItem.example === "string"
+																	? displayTargetItem.example
+																	: null;
+															const context =
+																"context" in displayTargetItem &&
+																typeof displayTargetItem.context === "string"
+																	? displayTargetItem.context
+																	: null;
+
+															return (
+																<View className="border-t border-[#EEEFF4] pt-2 gap-1">
+																	<View className="flex-row items-center flex-wrap gap-2">
+																		<Text className="font-poppins-bold text-[18px] leading-[24px] text-[#6C4EF5]">
+																			{term}
+																		</Text>
+																		{partOfSpeech ? (
+																			<View className="bg-lingua-purple/10 px-2 py-0.5 rounded-md">
+																				<Text className="font-poppins-bold text-[9px] leading-[13px] text-[#6C4EF5] uppercase">
+																					{partOfSpeech}
+																				</Text>
+																			</View>
+																		) : (
+																			<View className="bg-blue-50 px-2 py-0.5 rounded-md">
+																				<Text className="font-poppins-bold text-[9px] leading-[13px] text-blue-600 uppercase">
+																					phrase
+																				</Text>
+																			</View>
+																		)}
+																	</View>
+
+																	<View className="flex-row items-center flex-wrap gap-1.5 mt-0.5">
+																		{pronunciation ? (
+																			<Text className="font-poppins-bold text-[12px] leading-[17px] text-[#FF8A00] bg-[#FFF5E6] px-1.5 py-0.5 rounded">
+																				/{pronunciation}/
+																			</Text>
+																		) : null}
+																		<Text className="font-poppins-medium text-[12px] leading-[17px] text-[#58617E]">
+																			means
+																		</Text>
+																		<Text className="font-poppins-bold text-[13px] leading-[18px] text-[#19CC33]">
+																			{'"' + translation + '"'}
+																		</Text>
+																	</View>
+
+																	{example ? (
+																		<Text className="mt-1 font-poppins-medium italic text-[11px] leading-[16px] text-[#58617E] bg-[#F7F8FA] p-2 rounded-lg border-l-2 border-[#6C4EF5]">
+																			{'"' + example + '"'}
+																		</Text>
+																	) : null}
+
+																	{context ? (
+																		<Text className="mt-1 font-poppins-medium italic text-[11px] leading-[16px] text-[#58617E] bg-[#F7F8FA] p-2 rounded-lg border-l-2 border-blue-500">
+																			💡 {context}
+																		</Text>
+																	) : null}
+																</View>
+															);
+														})()
+													: null}
+											</View>
+										</View>
+										<View style={styles.bubbleTail} />
+									</View>
+								);
+							})()
+						: null}
 
 					{callError || agentError ? (
 						<View style={styles.callErrorCard}>
@@ -671,88 +1957,210 @@ export default function AudioLessonScreen() {
 						</View>
 					) : null}
 
-					<View style={styles.controlDock}>
-						{renderControl({
-							label: "Camera",
-							icon: "videocam",
-							disabled: !isJoined,
-							onPress: toggleCamera,
-						})}
-						{renderControl({
-							label: "Mic",
-							icon: isMuted ? "mic-off" : "mic",
-							disabled: !isJoined,
-							onPress: toggleMute,
-						})}
-						{renderControl({
-							label: "Subtitles",
-							icon: showSubtitles ? "language" : "text-outline",
-							onPress: toggleSubtitles,
-						})}
-						<View style={styles.controlItem}>
-							<TouchableOpacity
-								accessibilityLabel="End Call"
-								accessibilityRole="button"
-								activeOpacity={0.82}
-								style={[styles.controlCircle, styles.dangerControlCircle]}
-								onPress={endCall}
-							>
-								<Ionicons name="call" size={34} color="#FFFFFF" />
-							</TouchableOpacity>
-							<Text className="font-poppins-bold text-[14px] leading-[18px] text-white">
-								End Call
-							</Text>
-						</View>
-					</View>
-				</View>
-
-				<View style={styles.feedbackCard}>
-					<View style={styles.feedbackColumn}>
-						<Text className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary">
-							Speaking
-						</Text>
-						<Text className="mt-2 text-center font-poppins-bold text-[15px] leading-[21px] text-[#19CC33]">
-							Excellent
-						</Text>
-					</View>
-					<View style={styles.feedbackDivider} />
-					<View style={styles.feedbackColumn}>
-						<Text className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary">
-							Pronunciation
-						</Text>
-						<Text className="mt-2 text-center font-poppins-bold text-[15px] leading-[21px] text-[#168BFF]">
-							Great
-						</Text>
-					</View>
-					<View style={styles.feedbackDivider} />
-					<View style={styles.feedbackColumn}>
-						<Text className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary">
-							Grammar
-						</Text>
-						<Text className="mt-2 text-center font-poppins-bold text-[15px] leading-[21px] text-[#654BFF]">
-							Good
-						</Text>
-					</View>
-				</View>
-
-				<View style={styles.lessonContextCard}>
-					<Text className="font-poppins-bold text-[14px] leading-[20px] text-neutral-primary">
-						{primaryGoal}
-					</Text>
-					<View className="mt-3 flex-row flex-wrap gap-2">
-						{[firstPhrase, secondPhrase].filter(Boolean).map((phrase) => (
-							<View key={phrase.id} className="rounded-full bg-[#F1EEFF] px-3 py-2">
-								<Text className="font-poppins-semibold text-[12px] leading-[16px] text-lingua-purple">
-									{phrase.text}
+					<View
+						style={[
+							styles.liveCaptionsPanel,
+							isCompactLessonView && styles.liveCaptionsPanelCompact,
+							shouldShowReadyToFinishControls && styles.liveCaptionsPanelReady,
+							shouldShowReadyToFinishControls &&
+								isCompactLessonView &&
+								styles.liveCaptionsPanelReadyCompact,
+						]}
+					>
+						<View className="mb-2 flex-row items-center justify-between">
+							<View className="flex-row items-center gap-2">
+								<Ionicons name="text" size={15} color="#FFFFFF" />
+								<Text className="font-poppins-bold text-[11px] leading-[15px] text-white">
+									Live captions
 								</Text>
 							</View>
-						))}
+							<View
+								style={[
+									styles.captionPulse,
+									{ backgroundColor: captionRows.length > 0 ? "#21C16B" : "#A8AFBF" },
+								]}
+							/>
+						</View>
+						{captionRows.length > 0 ? (
+							captionRows.map((caption) => (
+								<View
+									key={caption.id}
+									style={[styles.captionLine, caption.isInterim && styles.captionLineInterim]}
+								>
+									<Text
+										className={`font-poppins-bold text-[11px] leading-[15px] ${
+											caption.speakerKind === "teacher" ? "text-[#B8F7CE]" : "text-[#D8D0FF]"
+										}`}
+									>
+										{caption.speakerLabel}
+									</Text>
+									<Text className="flex-1 font-poppins-semibold text-[12px] leading-[17px] text-white">
+										{formatCaptionForReading(caption.text)}
+									</Text>
+								</View>
+							))
+						) : (
+							<Text className="font-poppins-medium text-[12px] leading-[17px] text-white/75">
+								{captionError ?? "Captions will appear as soon as someone speaks."}
+							</Text>
+						)}
 					</View>
-					<Text className="mt-3 font-poppins-regular text-[11px] leading-[16px] text-[#64708D]">
-						{lesson.aiTeacherPrompt}
-					</Text>
+
+					<View style={styles.pushToTalkDock}>
+						{shouldShowReadyToFinishControls ? (
+							<View style={styles.readyFinishPanel}>
+								<View className="flex-1">
+									<Text className="font-poppins-bold text-[14px] leading-[19px] text-white">
+										Ready to finish
+									</Text>
+									<Text className="font-poppins-medium text-[10px] leading-[14px] text-white/80">
+										Repeat again or save your progress.
+									</Text>
+								</View>
+								<TouchableOpacity
+									activeOpacity={0.86}
+									accessibilityLabel="Finish lesson"
+									accessibilityRole="button"
+									style={styles.readyFinishButton}
+									onPress={finishReadyLesson}
+								>
+									<Ionicons name="checkmark-circle" size={18} color="#FFFFFF" />
+									<Text className="font-poppins-bold text-[13px] leading-[17px] text-white">
+										Finish
+									</Text>
+								</TouchableOpacity>
+							</View>
+						) : null}
+						<View style={styles.talkControlRow}>
+							<TouchableOpacity
+								accessibilityLabel="Open lesson info"
+								accessibilityRole="button"
+								activeOpacity={0.82}
+								style={styles.infoControlButton}
+								onPress={() => setIsLessonInfoVisible(true)}
+							>
+								<Ionicons name="information-circle-outline" size={26} color="#6C4EF5" />
+							</TouchableOpacity>
+							<TouchableOpacity
+								accessibilityHint={pushToTalkHint}
+								accessibilityLabel="Hold to talk to the AI teacher"
+								accessibilityRole="button"
+								accessibilityState={
+									!canUsePushToTalk && !isMicOpen ? { disabled: true } : undefined
+								}
+								activeOpacity={0.9}
+								disabled={!canUsePushToTalk && !isMicOpen}
+								style={[
+									styles.pushToTalkButton,
+									isMicOpen && styles.pushToTalkButtonActive,
+									(isTeacherThinking || isTeacherTalking || isMicChanging) &&
+										styles.pushToTalkButtonWaiting,
+									!canUsePushToTalk && !isMicOpen && styles.disabledControlCircle,
+								]}
+								onPressIn={openPushToTalk}
+								onPressOut={closePushToTalk}
+							>
+								{isTeacherThinking || isMicChanging ? (
+									<ActivityIndicator size="large" color="#FFFFFF" />
+								) : (
+									<Ionicons name={isMicOpen ? "mic" : "mic-outline"} size={42} color="#FFFFFF" />
+								)}
+							</TouchableOpacity>
+							<View style={styles.infoControlSpacer} />
+						</View>
+						{shouldShowReadyToFinishControls ? null : (
+							<>
+								<Text className="mt-3 text-center font-poppins-bold text-[16px] leading-[22px] text-white">
+									{pushToTalkLabel}
+								</Text>
+								<Text className="mt-1 text-center font-poppins-medium text-[11px] leading-[15px] text-white/80">
+									{pushToTalkSubLabel}
+								</Text>
+							</>
+						)}
+						{isTeacherThinking ? (
+							<TouchableOpacity
+								activeOpacity={0.82}
+								accessibilityLabel="Cancel waiting for AI teacher response"
+								accessibilityRole="button"
+								style={styles.cancelResponseButton}
+								onPress={cancelAwaitingTeacherResponse}
+							>
+								<Ionicons name="close" size={16} color="#FFFFFF" />
+								<Text className="font-poppins-bold text-[12px] leading-[16px] text-white">
+									Cancel
+								</Text>
+							</TouchableOpacity>
+						) : null}
+					</View>
 				</View>
-			</ScrollView>
+			</View>
+
+			<Modal
+				animationType="fade"
+				onRequestClose={() => setIsLessonInfoVisible(false)}
+				transparent
+				visible={isLessonInfoVisible}
+			>
+				<View style={styles.modalBackdrop}>
+					<View style={styles.lessonInfoModal}>
+						<View className="mb-3 flex-row items-center justify-between">
+							<View className="flex-1 pr-3">
+								<Text className="font-poppins-bold text-[20px] leading-[26px] text-neutral-primary">
+									{lesson.title}
+								</Text>
+								<Text className="mt-1 font-poppins-medium text-[12px] leading-[17px] text-[#64708D]">
+									{primaryGoal}
+								</Text>
+							</View>
+							<TouchableOpacity
+								accessibilityLabel="Close lesson info"
+								accessibilityRole="button"
+								activeOpacity={0.75}
+								style={styles.modalCloseButton}
+								onPress={() => setIsLessonInfoVisible(false)}
+							>
+								<Ionicons name="close" size={22} color="#0D132B" />
+							</TouchableOpacity>
+						</View>
+						<ScrollView
+							contentContainerStyle={styles.lessonInfoContent}
+							showsVerticalScrollIndicator={false}
+						>
+							{teacherTargetItems.map((item, index) => {
+								const term = "term" in item ? item.term : item.text;
+								const kind = "partOfSpeech" in item ? item.partOfSpeech : "phrase";
+
+								return (
+									<View key={item.id} style={styles.lessonInfoTarget}>
+										<View className="flex-row items-start justify-between gap-3">
+											<View className="flex-1">
+												<Text className="font-poppins-bold text-[16px] leading-[22px] text-lingua-purple">
+													{index + 1}. {term}
+												</Text>
+												<Text className="mt-1 font-poppins-bold text-[12px] leading-[17px] text-[#FF8A00]">
+													{item.pronunciation}
+												</Text>
+											</View>
+											<View style={styles.lessonInfoKindPill}>
+												<Text className="font-poppins-bold text-[9px] uppercase leading-[13px] text-[#6C4EF5]">
+													{kind}
+												</Text>
+											</View>
+										</View>
+										<Text className="mt-2 font-poppins-semibold text-[13px] leading-[18px] text-[#21C16B]">
+											{item.translation}
+										</Text>
+									</View>
+								);
+							})}
+							<Text className="font-poppins-medium text-[12px] leading-[18px] text-[#64708D]">
+								{lesson.aiTeacherPrompt}
+							</Text>
+						</ScrollView>
+					</View>
+				</View>
+			</Modal>
 
 			<View style={[styles.tabBar, { paddingBottom: Math.max(insets.bottom, 10) }]}>
 				{tabs.map((tab) => {
@@ -795,7 +2203,9 @@ const styles = StyleSheet.create({
 		flex: 1,
 		backgroundColor: "#FFFFFF",
 	},
-	scrollContent: {
+	screenContent: {
+		flex: 1,
+		justifyContent: "space-between",
 		paddingHorizontal: 14,
 		backgroundColor: "#FFFFFF",
 	},
@@ -806,21 +2216,6 @@ const styles = StyleSheet.create({
 		borderRadius: 18,
 		backgroundColor: "#6C4EF5",
 		paddingHorizontal: 24,
-	},
-	headerAction: {
-		width: 51,
-		height: 51,
-		alignItems: "center",
-		justifyContent: "center",
-		borderWidth: 2,
-		borderColor: "#EEF0F7",
-		borderRadius: 26,
-		backgroundColor: "#FFFFFF",
-	},
-	headerActionText: {
-		lineHeight: 51,
-		includeFontPadding: false,
-		textAlign: "center",
 	},
 	callStatusDot: {
 		width: 13,
@@ -833,7 +2228,6 @@ const styles = StyleSheet.create({
 		borderRadius: 5,
 	},
 	teacherStage: {
-		height: 504,
 		overflow: "hidden",
 		borderRadius: 23,
 		backgroundColor: "#DAD5D3",
@@ -842,95 +2236,138 @@ const styles = StyleSheet.create({
 		position: "absolute",
 		width: "100%",
 		height: "100%",
-		opacity: 0.55,
+		opacity: 0.72,
 	},
 	stageOverlay: {
 		position: "absolute",
 		right: 0,
 		bottom: 0,
 		left: 0,
-		height: "33%",
+		height: "36%",
 		backgroundColor: "rgba(56, 48, 55, 0.34)",
 	},
 	lessonPill: {
 		position: "absolute",
 		top: 16,
 		left: 16,
-		maxWidth: 190,
+		zIndex: 4,
+		maxWidth: 210,
 		borderRadius: 18,
 		backgroundColor: "rgba(13, 19, 43, 0.56)",
 		paddingHorizontal: 14,
 		paddingVertical: 9,
 	},
-	previewCard: {
+	lessonStatePanel: {
 		position: "absolute",
-		top: 23,
-		right: 20,
-		width: 111,
-		height: 143,
-		alignItems: "center",
-		justifyContent: "center",
-		overflow: "hidden",
-		borderWidth: 3,
-		borderColor: "#FFFFFF",
-		borderRadius: 23,
-		backgroundColor: "rgba(255, 255, 255, 0.82)",
+		top: 18,
+		right: 16,
+		zIndex: 4,
+		gap: 8,
 	},
-	previewMascot: {
-		width: 96,
-		height: 96,
-	},
-	previewStatus: {
-		position: "absolute",
-		right: 8,
-		bottom: 8,
+	lessonStatePill: {
+		minWidth: 112,
 		flexDirection: "row",
 		alignItems: "center",
-		gap: 3,
+		justifyContent: "center",
+		gap: 6,
+		borderWidth: 1,
+		borderColor: "rgba(255, 255, 255, 0.72)",
 		borderRadius: 999,
-		backgroundColor: "#FFFFFF",
-		paddingHorizontal: 7,
-		paddingVertical: 3,
+		backgroundColor: "rgba(13, 19, 43, 0.64)",
+		paddingHorizontal: 12,
+		paddingVertical: 8,
+	},
+	lessonStatePillActive: {
+		borderColor: "rgba(108, 78, 245, 0.1)",
+		backgroundColor: "#6C4EF5",
+	},
+	lessonProgressPill: {
+		minWidth: 142,
+		borderWidth: 1,
+		borderColor: "rgba(255, 255, 255, 0.38)",
+		borderRadius: 14,
+		backgroundColor: "rgba(13, 19, 43, 0.52)",
+		paddingHorizontal: 10,
+		paddingVertical: 8,
+	},
+	lessonProgressMetaRow: {
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "space-between",
+		gap: 8,
+	},
+	lessonProgressTrack: {
+		height: 5,
+		marginTop: 6,
+		overflow: "hidden",
+		borderRadius: 999,
+		backgroundColor: "rgba(255, 255, 255, 0.28)",
+	},
+	lessonProgressFill: {
+		height: "100%",
+		borderRadius: 999,
+		backgroundColor: "#21C16B",
 	},
 	teacherMascot: {
 		position: "absolute",
-		bottom: 144,
-		left: -6,
-		width: 298,
-		height: 298,
+		bottom: 276,
+		left: -2,
+		zIndex: 4,
+		width: 126,
+		height: 126,
+	},
+	teacherMascotCompact: {
+		bottom: 226,
+		left: -4,
+		width: 104,
+		height: 104,
 	},
 	responseBubble: {
 		position: "absolute",
-		right: 72,
-		bottom: 190,
-		left: 54,
-		minHeight: 118,
+		right: 24,
+		left: 104,
+		minHeight: 104,
+		maxHeight: 230,
+		zIndex: 3,
 		flexDirection: "row",
 		alignItems: "center",
-		gap: 12,
 		borderWidth: 1,
 		borderColor: "#EEEFF4",
 		borderRadius: 20,
 		backgroundColor: "#FFFFFF",
-		paddingHorizontal: 20,
-		paddingVertical: 15,
+		paddingHorizontal: 16,
+		paddingVertical: 12,
 		boxShadow: "0 8px 22px rgba(22, 24, 40, 0.14)",
+	},
+	responseBubbleRegular: {
+		bottom: 312,
+	},
+	responseBubbleCompact: {
+		top: 112,
+		right: 14,
+		left: 90,
+		minHeight: 82,
+		maxHeight: 108,
+		paddingHorizontal: 12,
+		paddingVertical: 9,
 	},
 	bubbleTail: {
 		position: "absolute",
-		right: 18,
-		bottom: -23,
+		left: -18,
+		bottom: 34,
 		width: 0,
 		height: 0,
-		borderTopWidth: 24,
-		borderLeftWidth: 24,
-		borderTopColor: "#FFFFFF",
-		borderLeftColor: "transparent",
+		borderTopWidth: 14,
+		borderBottomWidth: 14,
+		borderRightWidth: 20,
+		borderTopColor: "transparent",
+		borderBottomColor: "transparent",
+		borderRightColor: "#FFFFFF",
 	},
 	callErrorCard: {
 		position: "absolute",
 		right: 18,
-		bottom: 124,
+		bottom: 264,
 		left: 18,
 		minHeight: 34,
 		flexDirection: "row",
@@ -941,32 +2378,256 @@ const styles = StyleSheet.create({
 		paddingHorizontal: 12,
 		paddingVertical: 8,
 	},
-	controlCircle: {
-		width: 72,
-		height: 72,
+	liveCaptionsPanel: {
+		position: "absolute",
+		right: 14,
+		bottom: 142,
+		left: 14,
+		minHeight: 96,
+		maxHeight: 132,
+		borderWidth: 1,
+		borderColor: "rgba(255, 255, 255, 0.2)",
+		borderRadius: 18,
+		backgroundColor: "rgba(13, 19, 43, 0.72)",
+		paddingHorizontal: 13,
+		paddingVertical: 11,
+	},
+	liveCaptionsPanelCompact: {
+		bottom: 150,
+		minHeight: 58,
+		maxHeight: 68,
+		paddingHorizontal: 12,
+		paddingVertical: 8,
+	},
+	liveCaptionsPanelReady: {
+		bottom: 182,
+	},
+	liveCaptionsPanelReadyCompact: {
+		bottom: 162,
+	},
+	captionPulse: {
+		width: 9,
+		height: 9,
+		borderRadius: 5,
+	},
+	captionLine: {
+		flexDirection: "row",
+		gap: 9,
+		paddingVertical: 2,
+	},
+	captionLineInterim: {
+		opacity: 0.78,
+	},
+	pushToTalkButton: {
+		width: 96,
+		height: 96,
 		alignItems: "center",
 		justifyContent: "center",
-		borderRadius: 36,
-		backgroundColor: "#FFFFFF",
-		boxShadow: "0 8px 18px rgba(22, 24, 40, 0.08)",
+		borderWidth: 6,
+		borderColor: "rgba(255, 255, 255, 0.45)",
+		borderRadius: 48,
+		backgroundColor: "#6C4EF5",
+		boxShadow: "0 12px 26px rgba(108, 78, 245, 0.36)",
 	},
-	dangerControlCircle: {
-		backgroundColor: "#FF424B",
+	pushToTalkButtonActive: {
+		backgroundColor: "#18D313",
+		boxShadow: "0 12px 26px rgba(24, 211, 19, 0.32)",
+	},
+	pushToTalkButtonWaiting: {
+		backgroundColor: "#A8AFBF",
+		boxShadow: "0 10px 22px rgba(22, 24, 40, 0.18)",
 	},
 	disabledControlCircle: {
 		opacity: 0.58,
 	},
-	controlItem: {
-		flex: 1,
-		alignItems: "center",
-		gap: 5,
-	},
-	controlDock: {
+	pushToTalkDock: {
 		position: "absolute",
 		right: 12,
-		bottom: 34,
+		bottom: 12,
 		left: 12,
+		alignItems: "center",
+	},
+	talkControlRow: {
+		width: "100%",
 		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "center",
+		gap: 16,
+	},
+	infoControlButton: {
+		width: 48,
+		height: 48,
+		alignItems: "center",
+		justifyContent: "center",
+		borderWidth: 1,
+		borderColor: "#E8E5FF",
+		borderRadius: 24,
+		backgroundColor: "rgba(247, 245, 255, 0.96)",
+		boxShadow: "0 8px 18px rgba(22, 24, 40, 0.14)",
+	},
+	infoControlSpacer: {
+		width: 48,
+		height: 48,
+	},
+	readyFinishPanel: {
+		width: "100%",
+		minHeight: 58,
+		marginBottom: 8,
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 12,
+		borderWidth: 1,
+		borderColor: "rgba(255, 255, 255, 0.28)",
+		borderRadius: 18,
+		backgroundColor: "rgba(13, 19, 43, 0.72)",
+		paddingHorizontal: 14,
+		paddingVertical: 10,
+		boxShadow: "0 10px 24px rgba(13, 19, 43, 0.24)",
+	},
+	readyFinishButton: {
+		minHeight: 40,
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "center",
+		gap: 7,
+		borderRadius: 999,
+		backgroundColor: "#21C16B",
+		paddingHorizontal: 16,
+		paddingVertical: 9,
+		boxShadow: "0 8px 18px rgba(33, 193, 107, 0.26)",
+	},
+	cancelResponseButton: {
+		marginTop: 10,
+		minHeight: 34,
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "center",
+		gap: 6,
+		borderWidth: 1,
+		borderColor: "rgba(255, 255, 255, 0.42)",
+		borderRadius: 999,
+		backgroundColor: "rgba(13, 19, 43, 0.46)",
+		paddingHorizontal: 14,
+		paddingVertical: 7,
+	},
+	reviewScreen: {
+		flex: 1,
+		alignItems: "center",
+		justifyContent: "center",
+		paddingHorizontal: 24,
+		backgroundColor: "#FFFFFF",
+	},
+	reviewHero: {
+		width: 174,
+		height: 174,
+		alignItems: "center",
+		justifyContent: "center",
+		borderRadius: 87,
+		backgroundColor: "#E9FBF0",
+	},
+	reviewMascot: {
+		width: 146,
+		height: 146,
+	},
+	reviewBadge: {
+		position: "absolute",
+		right: 8,
+		bottom: 12,
+		width: 54,
+		height: 54,
+		alignItems: "center",
+		justifyContent: "center",
+		borderWidth: 5,
+		borderColor: "#FFFFFF",
+		borderRadius: 27,
+		backgroundColor: "#6C4EF5",
+	},
+	reviewCommentCard: {
+		width: "100%",
+		gap: 12,
+		marginTop: 14,
+		marginBottom: 18,
+		borderWidth: 1,
+		borderColor: "#ECEFF6",
+		borderRadius: 18,
+		backgroundColor: "#FFFFFF",
+		paddingHorizontal: 16,
+		paddingVertical: 16,
+		boxShadow: "0 8px 24px rgba(22, 24, 40, 0.07)",
+	},
+	completedScreen: {
+		flex: 1,
+		alignItems: "center",
+		justifyContent: "center",
+		paddingHorizontal: 24,
+		backgroundColor: "#FFFFFF",
+	},
+	completedBackButton: {
+		position: "absolute",
+		top: 18,
+		left: 18,
+		width: 48,
+		height: 48,
+		alignItems: "flex-start",
+		justifyContent: "center",
+	},
+	completedHero: {
+		width: 188,
+		height: 188,
+		alignItems: "center",
+		justifyContent: "center",
+		borderRadius: 94,
+		backgroundColor: "#F1EEFF",
+	},
+	completedMascot: {
+		width: 158,
+		height: 158,
+	},
+	completedCheckBadge: {
+		position: "absolute",
+		right: 10,
+		bottom: 14,
+		width: 58,
+		height: 58,
+		alignItems: "center",
+		justifyContent: "center",
+		borderWidth: 5,
+		borderColor: "#FFFFFF",
+		borderRadius: 29,
+		backgroundColor: "#21C16B",
+	},
+	completedRewardCard: {
+		width: "100%",
+		marginTop: 24,
+		marginBottom: 18,
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "space-between",
+		borderWidth: 1,
+		borderColor: "#ECEFF6",
+		borderRadius: 18,
+		backgroundColor: "#FFFFFF",
+		paddingHorizontal: 18,
+		paddingVertical: 16,
+		boxShadow: "0 10px 28px rgba(22, 24, 40, 0.08)",
+	},
+	completedPrimaryButton: {
+		width: "100%",
+		height: 58,
+		alignItems: "center",
+		justifyContent: "center",
+		borderRadius: 18,
+		backgroundColor: "#6C4EF5",
+		boxShadow: "0 10px 24px rgba(108, 78, 245, 0.24)",
+	},
+	completedSecondaryButton: {
+		width: "100%",
+		height: 54,
+		marginTop: 10,
+		alignItems: "center",
+		justifyContent: "center",
+		borderRadius: 18,
+		backgroundColor: "#F1EEFF",
 	},
 	feedbackColumn: {
 		flex: 1,
@@ -989,12 +2650,47 @@ const styles = StyleSheet.create({
 		paddingHorizontal: 14,
 		boxShadow: "0 10px 28px rgba(22, 24, 40, 0.09)",
 	},
-	lessonContextCard: {
-		marginTop: 12,
-		borderRadius: 18,
+	modalBackdrop: {
+		flex: 1,
+		justifyContent: "flex-end",
+		backgroundColor: "rgba(13, 19, 43, 0.42)",
+		paddingHorizontal: 14,
+		paddingBottom: 18,
+	},
+	lessonInfoModal: {
+		maxHeight: "78%",
+		borderRadius: 24,
 		backgroundColor: "#FFFFFF",
-		padding: 16,
-		boxShadow: "0 8px 24px rgba(22, 24, 40, 0.07)",
+		paddingHorizontal: 18,
+		paddingTop: 18,
+		paddingBottom: 16,
+		boxShadow: "0 18px 42px rgba(22, 24, 40, 0.18)",
+	},
+	modalCloseButton: {
+		width: 40,
+		height: 40,
+		alignItems: "center",
+		justifyContent: "center",
+		borderRadius: 20,
+		backgroundColor: "#F4F6FA",
+	},
+	lessonInfoContent: {
+		gap: 10,
+		paddingBottom: 4,
+	},
+	lessonInfoTarget: {
+		borderWidth: 1,
+		borderColor: "#ECEFF6",
+		borderRadius: 16,
+		backgroundColor: "#FFFFFF",
+		paddingHorizontal: 14,
+		paddingVertical: 12,
+	},
+	lessonInfoKindPill: {
+		borderRadius: 8,
+		backgroundColor: "#F1EEFF",
+		paddingHorizontal: 8,
+		paddingVertical: 4,
 	},
 	tabBar: {
 		position: "absolute",
