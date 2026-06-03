@@ -1,5 +1,5 @@
-import { StreamClient } from "@stream-io/node-sdk";
-import { getSignedInUser } from "@/lib/clerkAuth";
+import { getSignedInUser, isClerkAuthConfigError } from "@/lib/clerkAuth";
+import { createStreamServerClient } from "@/lib/streamServer";
 import type { StreamAudioCallRequest, StreamAudioCallSession } from "@/types/stream";
 
 const apiKey = process.env.EXPO_PUBLIC_STREAM_API_KEY;
@@ -11,11 +11,12 @@ function jsonError(message: string, status: number) {
 }
 
 function createCallId(userId: string, lessonId: string, languageCode: string) {
-	const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 48);
-	const safeLessonId = lessonId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 48);
-	const safeLanguageCode = languageCode.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 12);
+	const safeUserId = userId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(-12);
+	const safeLessonId = lessonId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 24);
+	const safeLanguageCode = languageCode.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 4);
+	const sessionId = Date.now().toString(36);
 
-	return `lesson-${safeLanguageCode}-${safeLessonId}-${safeUserId}`;
+	return `lesson-${safeLanguageCode}-${safeLessonId}-${safeUserId}-${sessionId}`;
 }
 
 function isString(value: unknown): value is string {
@@ -60,7 +61,17 @@ export async function POST(request: Request) {
 		return jsonError("Stream API key or secret is not configured.", 500);
 	}
 
-	const signedInUser = await getSignedInUser(request);
+	let signedInUser;
+
+	try {
+		signedInUser = await getSignedInUser(request);
+	} catch (error) {
+		if (isClerkAuthConfigError(error)) {
+			return jsonError(error.message, 500);
+		}
+
+		throw error;
+	}
 
 	if (!signedInUser) {
 		return jsonError("Sign in before starting an audio lesson call.", 401);
@@ -78,7 +89,7 @@ export async function POST(request: Request) {
 		return jsonError("Lesson and language context are required.", 400);
 	}
 
-	const stream = new StreamClient(apiKey, apiSecret);
+	const stream = createStreamServerClient(apiKey, apiSecret);
 	const userName = signedInUser.name || body.userName || "Language learner";
 	const userImage = signedInUser.image ?? body.userImage;
 	const callId = createCallId(signedInUser.id, body.lessonId, body.languageCode);
@@ -120,6 +131,17 @@ export async function POST(request: Request) {
 			created_by_id: signedInUser.id,
 			video: false,
 			members: [{ user_id: signedInUser.id }, { user_id: agentUserId, role: "admin" }],
+			settings_override: {
+				transcription: {
+					mode: "available",
+					closed_caption_mode: "available",
+					language: "auto",
+					speech_segment_config: {
+						max_speech_caption_ms: 5000,
+						silence_duration_ms: 300,
+					},
+				},
+			},
 			custom: {
 				lessonId: body.lessonId,
 				lessonTitle: body.lessonTitle,
@@ -131,13 +153,6 @@ export async function POST(request: Request) {
 				language: languageContext,
 				aiTeacher: teacherContext,
 			},
-			settings_override: {
-				audio: {
-					default_device: "speaker",
-					mic_default_on: true,
-					speaker_default_on: true,
-				},
-			},
 		},
 	});
 	await call.updateCallMembers({
@@ -147,9 +162,13 @@ export async function POST(request: Request) {
 		user_id: agentUserId,
 		grant_permissions: ["send-audio"],
 	});
+	await call.updateUserPermissions({
+		user_id: signedInUser.id,
+		grant_permissions: ["send-audio"],
+	});
 
 	try {
-		await call.goLive();
+		await call.goLive({ start_closed_caption: true });
 	} catch (error) {
 		console.warn("Stream audio room goLive failed or was already live:", error);
 	}

@@ -1,9 +1,35 @@
 import Constants from "expo-constants";
 import { Platform } from "react-native";
 
+const defaultDevServerPort = "8081";
+
 const trimTrailingSlash = (value: string) => value.replace(/\/$/, "");
 
-function getHostAndPort(uri?: string | null) {
+const trimSlashes = (value: string) => value.replace(/^\/+|\/+$/g, "");
+
+function isLocalhost(host: string) {
+	return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+function getPathname(uri: string) {
+	const normalizedUri = uri.includes("://") ? uri : `http://${uri}`;
+
+	try {
+		const { pathname } = new URL(normalizedUri);
+		return pathname === "/" ? "" : pathname;
+	} catch {
+		return "";
+	}
+}
+
+function joinUrlPath(baseUrl: string, basePath: string, path: string) {
+	const joinedPath = [trimSlashes(basePath), trimSlashes(path)].filter(Boolean).join("/");
+	const normalizedBaseUrl = trimTrailingSlash(baseUrl);
+
+	return joinedPath ? `${normalizedBaseUrl}/${joinedPath}` : normalizedBaseUrl;
+}
+
+function getHostAndPort(uri?: string | null, defaultPort = defaultDevServerPort) {
 	if (!uri) {
 		return null;
 	}
@@ -19,7 +45,7 @@ function getHostAndPort(uri?: string | null) {
 
 		return {
 			host: url.hostname,
-			port: url.port || "8081",
+			port: url.port || defaultPort,
 		};
 	} catch {
 		const [host, port] = uri.split(":");
@@ -30,9 +56,20 @@ function getHostAndPort(uri?: string | null) {
 
 		return {
 			host,
-			port: port || "8081",
+			port: port || defaultPort,
 		};
 	}
+}
+
+function getTailscaleDevServerUrl(port = defaultDevServerPort) {
+	const magicDnsHost = process.env.EXPO_PUBLIC_TAILSCALE_MAGIC_DNS_HOST?.trim();
+	const parsed = getHostAndPort(magicDnsHost, port);
+
+	if (!parsed) {
+		return null;
+	}
+
+	return `http://${parsed.host}:${parsed.port}`;
 }
 
 function getDevServerUrl() {
@@ -48,11 +85,18 @@ function getDevServerUrl() {
 	const parsed = getHostAndPort(hostCandidate);
 
 	if (parsed) {
+		if (isLocalhost(parsed.host)) {
+			return getTailscaleDevServerUrl(parsed.port) ?? `http://${parsed.host}:${parsed.port}`;
+		}
+
 		return `http://${parsed.host}:${parsed.port}`;
 	}
 
 	if (__DEV__) {
-		return Platform.OS === "android" ? "http://10.0.2.2:8081" : "http://localhost:8081";
+		const fallbackDevServerUrl =
+			Platform.OS === "android" ? "http://10.0.2.2:8081" : "http://localhost:8081";
+
+		return getTailscaleDevServerUrl() ?? fallbackDevServerUrl;
 	}
 
 	return null;
@@ -62,7 +106,18 @@ export function getApiUrl(path: string) {
 	const apiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL;
 
 	if (apiBaseUrl) {
-		return `${trimTrailingSlash(apiBaseUrl)}${path}`;
+		const parsedApiBaseUrl = getHostAndPort(apiBaseUrl);
+		const apiBasePath = getPathname(apiBaseUrl);
+
+		if (parsedApiBaseUrl && isLocalhost(parsedApiBaseUrl.host)) {
+			const tailscaleUrl = getTailscaleDevServerUrl(parsedApiBaseUrl.port);
+
+			if (tailscaleUrl) {
+				return joinUrlPath(tailscaleUrl, apiBasePath, path);
+			}
+		}
+
+		return joinUrlPath(apiBaseUrl, "", path);
 	}
 
 	if (Platform.OS === "web") {
