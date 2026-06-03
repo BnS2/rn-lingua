@@ -6,6 +6,7 @@ type StopAgentRequest = {
 };
 
 const agentServerUrl = process.env.VISION_AGENT_SERVER_URL ?? "http://localhost:8000";
+const agentSharedSecret = process.env.VISION_AGENT_SHARED_SECRET;
 
 function getAgentRequestTimeoutMs() {
 	const timeoutMs = Number(process.env.VISION_AGENT_REQUEST_TIMEOUT_MS);
@@ -20,6 +21,16 @@ function jsonError(message: string, status: number) {
 
 function isAbortError(error: unknown) {
 	return error instanceof DOMException && error.name === "AbortError";
+}
+
+function getAgentHeaders() {
+	const headers = new Headers();
+
+	if (agentSharedSecret) {
+		headers.set("Authorization", `Bearer ${agentSharedSecret}`);
+	}
+
+	return headers;
 }
 
 export async function POST(request: Request) {
@@ -59,7 +70,7 @@ export async function POST(request: Request) {
 			`${agentServerUrl.replace(/\/$/, "")}/calls/${encodeURIComponent(
 				body.callId,
 			)}/sessions/${encodeURIComponent(body.sessionId)}`,
-			{ method: "DELETE", signal: controller.signal },
+			{ method: "DELETE", headers: getAgentHeaders(), signal: controller.signal },
 		);
 
 		if (!response.ok && response.status !== 404) {

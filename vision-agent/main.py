@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import dotenv_values
-from vision_agents.core import Agent, AgentLauncher, Runner, User
+from fastapi import Header, HTTPException, status
+from vision_agents.core import Agent, AgentLauncher, Runner, ServeOptions, User
 from vision_agents.core.agents.events import (
     AgentTurnEndedEvent,
     AgentTurnStartedEvent,
@@ -61,6 +62,21 @@ def required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def verify_agent_request(authorization: Optional[str] = Header(default=None)) -> None:
+    shared_secret = os.getenv("VISION_AGENT_SHARED_SECRET")
+
+    if not shared_secret:
+        return
+
+    expected_authorization = f"Bearer {shared_secret}"
+
+    if authorization != expected_authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Vision Agent authorization.",
+        )
 
 
 def get_nested_text(data: dict[str, Any], *keys: str) -> Optional[str]:
@@ -646,7 +662,13 @@ def main() -> None:
             create_agent=create_agent,
             join_call=join_call,
             agent_idle_timeout=60.0,
-        )
+        ),
+        serve_options=ServeOptions(
+            can_start_session=verify_agent_request,
+            can_close_session=verify_agent_request,
+            can_view_session=verify_agent_request,
+            can_view_metrics=verify_agent_request,
+        ),
     ).cli()
 
 
