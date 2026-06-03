@@ -25,14 +25,18 @@ For this Expo app, the service also accepts the existing
 Preferred local run with Varlock:
 
 ```bash
-npx varlock run --path .. --path . -- uv run main.py run
+npx varlock run --path . -- uv run main.py run
 ```
 
 Preferred HTTP service run with Varlock:
 
 ```bash
-npx varlock run --path .. --path . -- uv run main.py serve --host 0.0.0.0 --port 8000
+npx varlock run --path . -- uv run main.py serve --host 0.0.0.0 --port 8000
 ```
+
+Use only the service path with Varlock so the standalone agent does not validate
+app-only secrets such as `CLERK_SECRET_KEY`. The service still reads `../.env`
+at startup for shared Stream values.
 
 Direct local fallback:
 

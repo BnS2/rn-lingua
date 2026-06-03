@@ -41,11 +41,18 @@ export type CoercedEnvSchema = {
 	EXPO_PUBLIC_API_BASE_URL?: string;
 
 	/**
+	 * **EXPO_PUBLIC_TAILSCALE_MAGIC_DNS_HOST**
+	 * Optional Tailscale MagicDNS host for reaching the local Expo dev server from a physical phone
+	 * ![icon](data:image/svg+xml;utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2220%22%20height%3D%2220%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20fill%3D%22%23808080%22%20d%3D%22M29%2022h-5a2.003%202.003%200%200%201-2-2v-6a2%202%200%200%201%202-2h5v2h-5v6h5ZM18%2012h-4V8h-2v14h6a2.003%202.003%200%200%200%202-2v-6a2%202%200%200%200-2-2m-4%208v-6h4v6Zm-6-8H3v2h5v2H4a2%202%200%200%200-2%202v2a2%202%200%200%200%202%202h6v-8a2%202%200%200%200-2-2m0%208H4v-2h4Z%22%2F%3E%3C%2Fsvg%3E)
+	 */
+	EXPO_PUBLIC_TAILSCALE_MAGIC_DNS_HOST?: string;
+
+	/**
 	 * **CLERK_SECRET_KEY** 🔐 _sensitive_
 	 * Clerk secret key — server-side only, used to verify session tokens
 	 * ![icon](data:image/svg+xml;utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2220%22%20height%3D%2220%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20fill%3D%22%23808080%22%20d%3D%22M29%2022h-5a2.003%202.003%200%200%201-2-2v-6a2%202%200%200%201%202-2h5v2h-5v6h5ZM18%2012h-4V8h-2v14h6a2.003%202.003%200%200%200%202-2v-6a2%202%200%200%200-2-2m-4%208v-6h4v6Zm-6-8H3v2h5v2H4a2%202%200%200%200-2%202v2a2%202%200%200%200%202%202h6v-8a2%202%200%200%200-2-2m0%208H4v-2h4Z%22%2F%3E%3C%2Fsvg%3E)
 	 */
-	CLERK_SECRET_KEY: string;
+	CLERK_SECRET_KEY?: string;
 
 	/**
 	 * **CLERK_JWT_KEY** 🔐 _sensitive_
@@ -69,6 +76,13 @@ export type CoercedEnvSchema = {
 	STREAM_API_SECRET: string;
 
 	/**
+	 * **STREAM_REQUEST_TIMEOUT_MS** 🔐 _sensitive_
+	 * Timeout in milliseconds for server-side Stream REST requests
+	 * ![icon](data:image/svg+xml;utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2220%22%20height%3D%2220%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20fill%3D%22%23808080%22%20d%3D%22M29%2022h-5a2.003%202.003%200%200%201-2-2v-6a2%202%200%200%201%202-2h5v2h-5v6h5ZM18%2012h-4V8h-2v14h6a2.003%202.003%200%200%200%202-2v-6a2%202%200%200%200-2-2m-4%208v-6h4v6Zm-6-8H3v2h5v2H4a2%202%200%200%200-2%202v2a2%202%200%200%200%202%202h6v-8a2%202%200%200%200-2-2m0%208H4v-2h4Z%22%2F%3E%3C%2Fsvg%3E)
+	 */
+	STREAM_REQUEST_TIMEOUT_MS?: string;
+
+	/**
 	 * **GOOGLE_API_KEY** 🔐 _sensitive_
 	 * Google Gemini API key — Python Vision Agent only, never expose in the mobile app
 	 * ![icon](data:image/svg+xml;utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2220%22%20height%3D%2220%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20fill%3D%22%23808080%22%20d%3D%22M29%2022h-5a2.003%202.003%200%200%201-2-2v-6a2%202%200%200%201%202-2h5v2h-5v6h5ZM18%2012h-4V8h-2v14h6a2.003%202.003%200%200%200%202-2v-6a2%202%200%200%200-2-2m-4%208v-6h4v6Zm-6-8H3v2h5v2H4a2%202%200%200%200-2%202v2a2%202%200%200%200%202%202h6v-8a2%202%200%200%200-2-2m0%208H4v-2h4Z%22%2F%3E%3C%2Fsvg%3E)
@@ -81,6 +95,13 @@ export type CoercedEnvSchema = {
 	 * ![icon](data:image/svg+xml;utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2220%22%20height%3D%2220%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20fill%3D%22%23808080%22%20d%3D%22M29%2022h-5a2.003%202.003%200%200%201-2-2v-6a2%202%200%200%201%202-2h5v2h-5v6h5ZM18%2012h-4V8h-2v14h6a2.003%202.003%200%200%200%202-2v-6a2%202%200%200%200-2-2m-4%208v-6h4v6Zm-6-8H3v2h5v2H4a2%202%200%200%200-2%202v2a2%202%200%200%200%202%202h6v-8a2%202%200%200%200-2-2m0%208H4v-2h4Z%22%2F%3E%3C%2Fsvg%3E)
 	 */
 	VISION_AGENT_SELECTED_LANGUAGE?: string;
+
+	/**
+	 * **VISION_AGENT_SERVER_URL** 🔐 _sensitive_
+	 * URL for the Python Vision Agent HTTP service used by Expo API routes
+	 * ![icon](data:image/svg+xml;utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2220%22%20height%3D%2220%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cpath%20fill%3D%22%23808080%22%20d%3D%22M29%2022h-5a2.003%202.003%200%200%201-2-2v-6a2%202%200%200%201%202-2h5v2h-5v6h5ZM18%2012h-4V8h-2v14h6a2.003%202.003%200%200%200%202-2v-6a2%202%200%200%200-2-2m-4%208v-6h4v6Zm-6-8H3v2h5v2H4a2%202%200%200%200-2%202v2a2%202%200%200%200%202%202h6v-8a2%202%200%200%200-2-2m0%208H4v-2h4Z%22%2F%3E%3C%2Fsvg%3E)
+	 */
+	VISION_AGENT_SERVER_URL?: string;
 
 	/**
 	 * **VISION_AGENT_REQUEST_TIMEOUT_MS** 🔐 _sensitive_
@@ -97,18 +118,19 @@ export type CoercedEnvSchema = {
 	GEMINI_REALTIME_MODEL?: string;
 };
 
-type _CoercedEnvSchema_920b9e4f = CoercedEnvSchema;
+type _CoercedEnvSchema_c07f8d11 = CoercedEnvSchema;
 
 declare module "varlock/env" {
-	export interface TypedEnvSchema extends Readonly<_CoercedEnvSchema_920b9e4f> {}
+	export interface TypedEnvSchema extends Readonly<_CoercedEnvSchema_c07f8d11> {}
 	export interface PublicTypedEnvSchema
 		extends Readonly<
 			Pick<
-				_CoercedEnvSchema_920b9e4f,
+				_CoercedEnvSchema_c07f8d11,
 				| "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY"
 				| "EXPO_OS"
 				| "EXPO_PUBLIC_STREAM_API_KEY"
 				| "EXPO_PUBLIC_API_BASE_URL"
+				| "EXPO_PUBLIC_TAILSCALE_MAGIC_DNS_HOST"
 				| "VISION_AGENT_SELECTED_LANGUAGE"
 				| "GEMINI_REALTIME_MODEL"
 			>
@@ -123,16 +145,16 @@ export type EnvSchemaAsStrings = {
 			: string;
 };
 
-type _EnvSchemaAsStrings_920b9e4f = EnvSchemaAsStrings;
+type _EnvSchemaAsStrings_c07f8d11 = EnvSchemaAsStrings;
 declare global {
 	// add types for global import.meta.env
-	interface ImportMetaEnv extends _EnvSchemaAsStrings_920b9e4f {}
+	interface ImportMetaEnv extends _EnvSchemaAsStrings_c07f8d11 {}
 	interface ImportMeta {
 		readonly env: ImportMetaEnv;
 	}
 
 	// add types for global process.env
 	namespace NodeJS {
-		interface ProcessEnv extends _EnvSchemaAsStrings_920b9e4f {}
+		interface ProcessEnv extends _EnvSchemaAsStrings_c07f8d11 {}
 	}
 }
