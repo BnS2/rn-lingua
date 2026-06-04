@@ -63,10 +63,12 @@ type CaptionRow = {
 	isInterim: boolean;
 };
 type TeacherTargetItem = PhraseItem | VocabularyItem;
+type TargetAttemptCounts = Record<string, number>;
 type AudioLessonTargetEvent = {
 	targetItemId: string;
 	targetIndex: number;
 	targetCount: number;
+	reason?: string;
 };
 
 type VisionAgentSession = {
@@ -104,8 +106,15 @@ const emptyCompletedLessonIds: string[] = [];
 const teacherResponseTimeoutMs = 10_000;
 const audioPermissionHydrationTimeoutMs = 4_000;
 const pushToTalkReleaseTailMs = 900;
+const finalFeedbackFallbackMs = 6_000;
 const learnerListeningCaption = "Listening to you...";
 const callingStateLeft = "left";
+const lessonPlaybackAudioMode = {
+	playsInSilentMode: true,
+	interruptionMode: "mixWithOthers",
+	allowsRecording: false,
+	shouldRouteThroughEarpiece: false,
+} as const;
 const webRtcUnavailableMessage =
 	"Live audio lessons use Stream WebRTC, which is not included in Expo Go. Run this app in a development build with `npm run ios` or `npm run android`.";
 
@@ -124,6 +133,10 @@ function getStreamVideoErrorMessage(error: unknown) {
 	}
 
 	return error instanceof Error ? error.message : "Unable to join the audio lesson.";
+}
+
+function restoreLessonPlaybackAudioMode() {
+	return setAudioModeAsync(lessonPlaybackAudioMode);
 }
 
 function normalizeLessonSpeechText(text: string) {
@@ -337,7 +350,20 @@ function parseAudioLessonTargetEvent(event: CustomVideoEvent): AudioLessonTarget
 		targetItemId: custom.targetItemId,
 		targetIndex,
 		targetCount,
+		reason: typeof custom.reason === "string" ? custom.reason : undefined,
 	};
+}
+
+function getCompletedTargetCountFromReview(review: LessonReview) {
+	const match = review.ratings.pronunciation.match(/^(\d+)\/(\d+)/);
+
+	if (!match) {
+		return null;
+	}
+
+	const completedTargetCount = Number(match[1]);
+
+	return Number.isFinite(completedTargetCount) ? completedTargetCount : null;
 }
 
 function formatLessonTextForReading(text: string, pronunciation?: string) {
@@ -358,17 +384,18 @@ function buildHonestLessonReview(
 	targetCount: number,
 ): LessonReview {
 	const coveredTargetCount = targetCount > 0 ? Math.min(completedTargetCount, targetCount) : 0;
+	const reviewAttemptCount = Math.max(learnerAttemptCount, coveredTargetCount);
 	const attemptedEveryTarget = targetCount > 0 && coveredTargetCount >= targetCount;
 	const spokeEnoughForPractice =
-		learnerAttemptCount >= Math.max(1, Math.min(targetCount || 1, coveredTargetCount || 1));
+		reviewAttemptCount >= Math.max(1, Math.min(targetCount || 1, coveredTargetCount || 1));
 
-	if (learnerAttemptCount === 0) {
+	if (reviewAttemptCount === 0) {
 		return fallbackLessonReview;
 	}
 
 	return {
 		ratings: {
-			speaking: `${learnerAttemptCount} attempt${learnerAttemptCount === 1 ? "" : "s"}`,
+			speaking: `${reviewAttemptCount} attempt${reviewAttemptCount === 1 ? "" : "s"}`,
 			pronunciation: `${coveredTargetCount}/${targetCount || 1} items`,
 			grammar: attemptedEveryTarget
 				? "Review anytime"
@@ -445,19 +472,27 @@ export default function AudioLessonScreen() {
 	const [isMicReleasing, setIsMicReleasing] = useState(false);
 	const [canPublishAudio, setCanPublishAudio] = useState(true);
 	const [isLessonInfoVisible, setIsLessonInfoVisible] = useState(false);
+	const [isFinishingLesson, setIsFinishingLesson] = useState(false);
+	const [isFinishPromptUnlocked, setIsFinishPromptUnlocked] = useState(false);
+	const [isReviewingFinishTarget, setIsReviewingFinishTarget] = useState(false);
 	const [streamClient, setStreamClient] = useState<StreamVideoClient | null>(null);
 
 	const [currentTargetIndex, setCurrentTargetIndex] = useState(0);
+	const [targetAttemptCounts, setTargetAttemptCounts] = useState<TargetAttemptCounts>({});
 	const [learnerAttemptCount, setLearnerAttemptCount] = useState(0);
+	const [learnerSpokenTurnCount, setLearnerSpokenTurnCount] = useState(0);
 
 	const didAutoStartCall = useRef(false);
 	const activeCallRef = useRef<Call | null>(null);
 	const agentSessionRef = useRef<VisionAgentSession | null>(null);
+	const isStartingCallRef = useRef(false);
+	const agentStartCallIdRef = useRef<string | null>(null);
 	const getTokenRef = useRef(getToken);
 	const isMountedRef = useRef(false);
 	const shouldCloseMicAfterOpenRef = useRef(false);
 	const didFinishLessonRef = useRef(false);
 	const didRequestFinishLessonRef = useRef(false);
+	const didRecordCurrentMicAttemptRef = useRef(false);
 	const audioPermissionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const releaseMicTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const streamClientRef = useRef<StreamVideoClient | null>(null);
@@ -477,10 +512,35 @@ export default function AudioLessonScreen() {
 		targetCount > 0 ? Math.min(Math.max(highestTargetIndex, 0), targetCount - 1) : 0;
 	const displayTargetItem = teacherTargetItems[clampedTargetIndex] ?? null;
 	const displayTargetIndex = displayTargetItem ? clampedTargetIndex : currentTargetIndex;
-	const displayTargetNumber =
-		targetCount > 0 ? Math.min(Math.max(displayTargetIndex, 0) + 1, targetCount) : 0;
+	const activeTargetPositionCount =
+		targetCount > 0 ? Math.min(displayTargetIndex + 1, targetCount) : 0;
+	const practicedTargetCount = teacherTargetItems.reduce((count, item) => {
+		const targetItemId = getTeacherTargetItemId(item);
+		return targetAttemptCounts[targetItemId] > 0 ? count + 1 : count;
+	}, 0);
+	const targetAttemptCount = Object.values(targetAttemptCounts).reduce(
+		(total, count) => total + count,
+		0,
+	);
+	const currentTargetAttemptCount = displayTargetItem
+		? (targetAttemptCounts[getTeacherTargetItemId(displayTargetItem)] ?? 0)
+		: 0;
+	const coveredTargetsBeforeCurrent =
+		targetCount > 0 ? Math.min(displayTargetIndex, targetCount) : 0;
+	const visibleTargetCoverageCount =
+		targetCount > 0 && currentTargetAttemptCount > 0
+			? Math.min(displayTargetIndex + 1, targetCount)
+			: coveredTargetsBeforeCurrent;
+	const practiceCoverageCount = Math.max(practicedTargetCount, visibleTargetCoverageCount);
 	const lessonProgressPercent =
-		targetCount > 0 ? Math.min((displayTargetNumber / targetCount) * 100, 100) : 0;
+		targetCount > 0 ? Math.min((activeTargetPositionCount / targetCount) * 100, 100) : 0;
+	const reviewAttemptCount = Math.max(
+		learnerAttemptCount,
+		learnerSpokenTurnCount,
+		targetAttemptCount,
+	);
+	const completedPracticeTargetCount =
+		targetCount > 0 ? Math.min(targetCount, practiceCoverageCount) : reviewAttemptCount;
 	const storedLessonReview = completedLessonRecord?.review ?? null;
 	const shouldShowCompletedLessonView =
 		Boolean(lesson && isLessonCompleted && !isRetryingCompletedLesson) && !isBusy && !isJoined;
@@ -499,41 +559,30 @@ export default function AudioLessonScreen() {
 		agentStatus === "connected" &&
 		hasTeacherSpoken &&
 		canPublishAudio &&
+		!isFinishingLesson &&
 		!isTeacherTalking &&
 		!isTeacherThinking &&
 		!isMicChanging &&
 		!isMicReleasing;
-	const isReadyToFinishByProgress =
-		targetCount > 0 &&
-		displayTargetNumber >= targetCount &&
-		learnerAttemptCount > 0 &&
-		hasTeacherCompletedTurn;
+	const isReadyToFinishByProgress = targetCount > 0 && completedPracticeTargetCount >= targetCount;
 	const inferredLessonReadyReview = useMemo(
 		() =>
 			isReadyToFinishByProgress
-				? buildHonestLessonReview(learnerAttemptCount, displayTargetNumber, targetCount)
+				? buildHonestLessonReview(reviewAttemptCount, completedPracticeTargetCount, targetCount)
 				: null,
-		[displayTargetNumber, isReadyToFinishByProgress, learnerAttemptCount, targetCount],
+		[completedPracticeTargetCount, isReadyToFinishByProgress, reviewAttemptCount, targetCount],
 	);
 	const activeLessonReadyReview = lessonReadyReview ?? inferredLessonReadyReview;
-	const progressAttemptLabel =
-		learnerAttemptCount > 0
-			? `${learnerAttemptCount} ${learnerAttemptCount === 1 ? "try" : "tries"}`
-			: "";
-	const shouldShowReadyToFinishControls =
-		isJoined &&
-		agentStatus === "connected" &&
-		hasTeacherCompletedTurn &&
-		Boolean(activeLessonReadyReview) &&
-		isReadyToFinishByProgress &&
-		!isMicOpen &&
-		!isMicChanging &&
-		!isTeacherTalking &&
-		!isTeacherThinking;
-	const teacherStageHeight = Math.max(
-		430,
-		Math.min(590, windowHeight - insets.top - insets.bottom - 188),
-	);
+	const isPracticeReadyToFinish = Boolean(activeLessonReadyReview);
+	const currentTargetAttemptLabel = `${currentTargetAttemptCount} ${
+		currentTargetAttemptCount === 1 ? "try" : "tries"
+	}`;
+	const shouldShowDonePracticingControl =
+		isJoined && agentStatus === "connected" && isPracticeReadyToFinish && isFinishPromptUnlocked;
+	const canPressFinishLesson =
+		shouldShowDonePracticingControl && !isMicOpen && !isMicChanging && !isMicReleasing;
+	const availableTeacherStageHeight = windowHeight - insets.top - insets.bottom - 148;
+	const teacherStageHeight = Math.max(430, Math.min(660, availableTeacherStageHeight));
 	const isCompactLessonView = teacherStageHeight < 520;
 	const captionRows = useMemo<CaptionRow[]>(() => {
 		const liveSpeakerKinds = new Set(liveCaptions.map((caption) => caption.speakerKind));
@@ -565,7 +614,7 @@ export default function AudioLessonScreen() {
 			});
 		});
 
-		return rows;
+		return rows.slice(-2);
 	}, [interimCaptionTextBySpeaker, isMicOpen, liveCaptions]);
 
 	const formatCaptionForReading = useCallback(
@@ -589,21 +638,67 @@ export default function AudioLessonScreen() {
 	);
 
 	const updateCurrentTargetIndex = useCallback((targetIndex: number) => {
-		setCurrentTargetIndex(targetIndex);
+		setCurrentTargetIndex((currentValue) => Math.max(currentValue, targetIndex));
 		setMaxTargetIndex((currentValue) => Math.max(currentValue, targetIndex));
 	}, []);
+
+	const recordTargetAttempt = useCallback((targetItem: TeacherTargetItem | null) => {
+		if (!targetItem) {
+			return;
+		}
+
+		const targetItemId = getTeacherTargetItemId(targetItem);
+
+		setTargetAttemptCounts((currentValue) => ({
+			...currentValue,
+			[targetItemId]: (currentValue[targetItemId] ?? 0) + 1,
+		}));
+	}, []);
+
+	const recordTargetAttemptsThroughIndex = useCallback(
+		(targetIndex: number) => {
+			if (targetIndex < 0) {
+				return;
+			}
+
+			setTargetAttemptCounts((currentValue) => {
+				const nextValue = { ...currentValue };
+				const clampedIndex = Math.min(targetIndex, teacherTargetItems.length - 1);
+
+				for (let index = 0; index <= clampedIndex; index += 1) {
+					const targetItem = teacherTargetItems[index];
+
+					if (targetItem) {
+						const targetItemId = getTeacherTargetItemId(targetItem);
+						nextValue[targetItemId] = Math.max(nextValue[targetItemId] ?? 0, 1);
+					}
+				}
+
+				return nextValue;
+			});
+		},
+		[teacherTargetItems],
+	);
 
 	const syncTargetFromLessonText = useCallback(
 		(text: string) => {
 			const targetIndex = getTargetItemIndex(text, teacherTargetItems);
 
 			if (targetIndex >= 0) {
+				if (targetIndex > displayTargetIndex) {
+					recordTargetAttemptsThroughIndex(targetIndex - 1);
+				}
 				updateCurrentTargetIndex(targetIndex);
 			}
 
 			return targetIndex;
 		},
-		[teacherTargetItems, updateCurrentTargetIndex],
+		[
+			displayTargetIndex,
+			recordTargetAttemptsThroughIndex,
+			teacherTargetItems,
+			updateCurrentTargetIndex,
+		],
 	);
 
 	useEffect(() => {
@@ -611,10 +706,7 @@ export default function AudioLessonScreen() {
 	}, [getToken]);
 
 	useEffect(() => {
-		setAudioModeAsync({
-			playsInSilentMode: true,
-			interruptionMode: "mixWithOthers",
-		}).catch((error) => {
+		restoreLessonPlaybackAudioMode().catch((error) => {
 			console.warn("Failed to configure lesson sound effects:", error);
 		});
 	}, []);
@@ -733,8 +825,13 @@ export default function AudioLessonScreen() {
 		setInterimCaptionTextBySpeaker({});
 		setCurrentTargetIndex(0);
 		setMaxTargetIndex(0);
+		setTargetAttemptCounts({});
+		setLearnerSpokenTurnCount(0);
 		setLessonReadyReview(null);
 		setCanPublishAudio(true);
+		setIsFinishingLesson(false);
+		setIsFinishPromptUnlocked(false);
+		setIsReviewingFinishTarget(false);
 
 		const currentClient = streamClientRef.current;
 
@@ -858,6 +955,15 @@ export default function AudioLessonScreen() {
 
 	const startAgentSession = useCallback(
 		async (session: StreamAudioCallSession) => {
+			if (agentSessionRef.current?.call_id === session.callId) {
+				return;
+			}
+
+			if (agentStartCallIdRef.current === session.callId) {
+				return;
+			}
+
+			agentStartCallIdRef.current = session.callId;
 			setAgentStatus("connecting");
 			setAgentError(null);
 
@@ -916,6 +1022,10 @@ export default function AudioLessonScreen() {
 			} catch (error) {
 				setAgentStatus("failed");
 				setAgentError(error instanceof Error ? error.message : "Unable to connect the AI teacher.");
+			} finally {
+				if (agentStartCallIdRef.current === session.callId) {
+					agentStartCallIdRef.current = null;
+				}
 			}
 		},
 		[getToken, setAgentError, setAgentSession, setAgentStatus],
@@ -952,16 +1062,21 @@ export default function AudioLessonScreen() {
 	);
 
 	const startOrJoinCall = useCallback(async () => {
-		if (isBusy || isJoined) {
+		if (isBusy || isJoined || isStartingCallRef.current) {
 			return;
 		}
 
+		isStartingCallRef.current = true;
+		didAutoStartCall.current = true;
 		setCallStatus("creating");
 		setCallError(null);
 		didFinishLessonRef.current = false;
+		didRecordCurrentMicAttemptRef.current = false;
 		setCurrentTargetIndex(0);
 		setMaxTargetIndex(0);
+		setTargetAttemptCounts({});
 		setLearnerAttemptCount(0);
+		setLearnerSpokenTurnCount(0);
 		setIsTeacherTurnActive(false);
 		setHasTeacherCompletedTurn(false);
 		setLatestTeacherSpeechText(null);
@@ -969,6 +1084,9 @@ export default function AudioLessonScreen() {
 		setInterimCaptionTextBySpeaker({});
 		setLessonReadyReview(null);
 		setCanPublishAudio(true);
+		setIsFinishingLesson(false);
+		setIsFinishPromptUnlocked(false);
+		setIsReviewingFinishTarget(false);
 
 		try {
 			const session = await requestCallSession();
@@ -983,17 +1101,19 @@ export default function AudioLessonScreen() {
 			await call.join({ create: true });
 			await call.camera.disable();
 			await call.microphone.disable();
+			await restoreLessonPlaybackAudioMode();
 			await startLiveCaptions(call);
 
 			setIsMicOpen(false);
 			setIsMicReleasing(false);
 			setCallStatus("joined");
 			await startAgentSession(session);
-			didAutoStartCall.current = true;
 		} catch (error) {
 			didAutoStartCall.current = false;
 			setCallStatus("error");
 			setCallError(getStreamVideoErrorMessage(error));
+		} finally {
+			isStartingCallRef.current = false;
 		}
 	}, [
 		getLessonStreamClient,
@@ -1050,6 +1170,7 @@ export default function AudioLessonScreen() {
 
 		try {
 			shouldCloseMicAfterOpenRef.current = false;
+			didRecordCurrentMicAttemptRef.current = false;
 			setIsMicChanging(true);
 			await activeCall.microphone.enable();
 			if (shouldCloseMicAfterOpenRef.current) {
@@ -1092,6 +1213,11 @@ export default function AudioLessonScreen() {
 		setIsMicOpen(false);
 		setIsMicReleasing(true);
 		setIsAwaitingTeacherResponse(true);
+		setLearnerSpokenTurnCount((currentValue) => currentValue + 1);
+		if (!didRecordCurrentMicAttemptRef.current) {
+			recordTargetAttempt(displayTargetItem ?? null);
+			didRecordCurrentMicAttemptRef.current = true;
+		}
 
 		if (releaseMicTimeoutRef.current) {
 			clearTimeout(releaseMicTimeoutRef.current);
@@ -1101,6 +1227,11 @@ export default function AudioLessonScreen() {
 			releaseMicTimeoutRef.current = null;
 			activeCall.microphone
 				.disable()
+				.then(() =>
+					restoreLessonPlaybackAudioMode().catch((error) => {
+						console.warn("Failed to restore lesson playback audio:", error);
+					}),
+				)
 				.catch((error) => {
 					setCallError(error instanceof Error ? error.message : "Unable to close microphone.");
 				})
@@ -1110,10 +1241,12 @@ export default function AudioLessonScreen() {
 		}, pushToTalkReleaseTailMs);
 	}, [
 		activeCall,
+		displayTargetItem,
 		isJoined,
 		isMicChanging,
 		isMicOpen,
 		isMicReleasing,
+		recordTargetAttempt,
 		setCallError,
 		setIsAwaitingTeacherResponse,
 		setIsMicOpen,
@@ -1137,7 +1270,7 @@ export default function AudioLessonScreen() {
 
 			const completedTargetCount = targetCount > 0 ? clampedTargetIndex + 1 : 0;
 			const nextReview =
-				review ?? buildHonestLessonReview(learnerAttemptCount, completedTargetCount, targetCount);
+				review ?? buildHonestLessonReview(reviewAttemptCount, completedTargetCount, targetCount);
 
 			didFinishLessonRef.current = true;
 			await cleanupLessonResources();
@@ -1151,7 +1284,7 @@ export default function AudioLessonScreen() {
 		[
 			clampedTargetIndex,
 			cleanupLessonResources,
-			learnerAttemptCount,
+			reviewAttemptCount,
 			setActiveCall,
 			setCallStatus,
 			setIsMicOpen,
@@ -1233,6 +1366,9 @@ export default function AudioLessonScreen() {
 			}
 
 			if (highestMatchedTargetIndex >= 0) {
+				if (highestMatchedTargetIndex > displayTargetIndex) {
+					recordTargetAttemptsThroughIndex(highestMatchedTargetIndex - 1);
+				}
 				updateCurrentTargetIndex(highestMatchedTargetIndex);
 			}
 		});
@@ -1240,7 +1376,14 @@ export default function AudioLessonScreen() {
 		return () => {
 			subscription.unsubscribe();
 		};
-	}, [activeCall, teacherTargetItems, updateCurrentTargetIndex, userId]);
+	}, [
+		activeCall,
+		displayTargetIndex,
+		recordTargetAttemptsThroughIndex,
+		teacherTargetItems,
+		updateCurrentTargetIndex,
+		userId,
+	]);
 
 	useEffect(() => {
 		if (!activeCall) {
@@ -1251,6 +1394,12 @@ export default function AudioLessonScreen() {
 			const finishReview = parseAudioLessonFinishReviewEvent(event);
 
 			if (finishReview) {
+				const completedTargetCount = getCompletedTargetCountFromReview(finishReview);
+
+				if (completedTargetCount !== null) {
+					recordTargetAttemptsThroughIndex(completedTargetCount - 1);
+				}
+
 				setLessonReadyReview(finishReview);
 				setIsAwaitingTeacherResponse(false);
 				return;
@@ -1262,12 +1411,20 @@ export default function AudioLessonScreen() {
 				const targetIndex = teacherTargetItems.findIndex(
 					(item) => getTeacherTargetItemId(item) === targetEvent.targetItemId,
 				);
-
-				updateCurrentTargetIndex(
+				const nextTargetIndex =
 					targetIndex >= 0
 						? targetIndex
-						: Math.min(targetEvent.targetIndex, Math.max(targetEvent.targetCount - 1, 0)),
-				);
+						: Math.min(targetEvent.targetIndex, Math.max(targetEvent.targetCount - 1, 0));
+
+				if (targetEvent.reason === "next") {
+					recordTargetAttemptsThroughIndex(nextTargetIndex - 1);
+				} else if (targetEvent.reason === "retry") {
+					recordTargetAttemptsThroughIndex(nextTargetIndex);
+				} else if (nextTargetIndex > displayTargetIndex) {
+					recordTargetAttemptsThroughIndex(nextTargetIndex - 1);
+				}
+
+				updateCurrentTargetIndex(nextTargetIndex);
 
 				return;
 			}
@@ -1301,6 +1458,19 @@ export default function AudioLessonScreen() {
 				captionEvent.status === "transcript" &&
 				captionEvent.text?.trim()
 			) {
+				const practicedTargetIndex = getTargetItemIndex(captionEvent.text, teacherTargetItems);
+				const practicedTargetItem =
+					practicedTargetIndex >= 0
+						? teacherTargetItems[practicedTargetIndex]
+						: (displayTargetItem ?? null);
+
+				if (!didRecordCurrentMicAttemptRef.current) {
+					recordTargetAttempt(practicedTargetItem);
+					didRecordCurrentMicAttemptRef.current = true;
+				}
+				if (practicedTargetIndex >= 0) {
+					updateCurrentTargetIndex(practicedTargetIndex);
+				}
 				setLearnerAttemptCount((currentValue) => currentValue + 1);
 				setIsAwaitingTeacherResponse(true);
 			}
@@ -1330,12 +1500,17 @@ export default function AudioLessonScreen() {
 		return unsubscribe;
 	}, [
 		activeCall,
+		displayTargetItem,
 		finishTeachingSession,
 		lesson,
+		recordTargetAttempt,
+		recordTargetAttemptsThroughIndex,
 		playTeacherTurnEndedSound,
 		setCallError,
 		setCallStatus,
 		syncTargetFromLessonText,
+		displayTargetIndex,
+		targetCount,
 		teacherTargetItems,
 		updateCurrentTargetIndex,
 	]);
@@ -1376,23 +1551,23 @@ export default function AudioLessonScreen() {
 		setCallStatus,
 	]);
 
-	const completeReviewedLesson = useCallback(() => {
-		if (lesson && lessonReview) {
-			markLessonCompleted(lesson.languageCode, lesson.id, lesson.xpReward, lessonReview);
+	useEffect(() => {
+		if (!isJoined || agentStatus !== "connected" || !isPracticeReadyToFinish) {
+			return;
 		}
-		setIsRetryingCompletedLesson(false);
-		setCallStatus("ended");
-	}, [lesson, lessonReview, markLessonCompleted, setCallStatus, setIsRetryingCompletedLesson]);
 
-	const finishReadyLesson = useCallback(() => {
-		didRequestFinishLessonRef.current = true;
-		finishTeachingSession(activeLessonReadyReview ?? undefined).catch((error) => {
-			setCallStatus("error");
-			setCallError(error instanceof Error ? error.message : "Unable to finish the audio lesson.");
-		});
-	}, [activeLessonReadyReview, finishTeachingSession, setCallError, setCallStatus]);
+		const revealDelay =
+			!isAwaitingTeacherResponse && !isTeacherTalking ? 350 : finalFeedbackFallbackMs;
+		const fallbackTimer = setTimeout(() => {
+			setIsFinishPromptUnlocked(true);
+		}, revealDelay);
 
-	const retryCompletedLesson = useCallback(() => {
+		return () => {
+			clearTimeout(fallbackTimer);
+		};
+	}, [agentStatus, isAwaitingTeacherResponse, isJoined, isPracticeReadyToFinish, isTeacherTalking]);
+
+	const resetLessonForRetry = useCallback(() => {
 		didAutoStartCall.current = false;
 		didFinishLessonRef.current = false;
 		didRequestFinishLessonRef.current = false;
@@ -1412,9 +1587,14 @@ export default function AudioLessonScreen() {
 		setIsRetryingCompletedLesson(true);
 		setIsMicReleasing(false);
 		setCanPublishAudio(true);
+		setIsFinishingLesson(false);
+		setIsFinishPromptUnlocked(false);
+		didRecordCurrentMicAttemptRef.current = false;
 		setCurrentTargetIndex(0);
 		setMaxTargetIndex(0);
+		setTargetAttemptCounts({});
 		setLearnerAttemptCount(0);
+		setLearnerSpokenTurnCount(0);
 	}, [
 		setAgentError,
 		setAgentStatus,
@@ -1426,6 +1606,61 @@ export default function AudioLessonScreen() {
 		setLessonReview,
 		setLiveCaptions,
 	]);
+
+	const completeReviewedLesson = useCallback(() => {
+		if (lesson && lessonReview) {
+			markLessonCompleted(lesson.languageCode, lesson.id, lesson.xpReward, lessonReview);
+		}
+		setIsRetryingCompletedLesson(false);
+		setCallStatus("ended");
+		router.replace("/(tabs)/learn");
+	}, [
+		lesson,
+		lessonReview,
+		markLessonCompleted,
+		router,
+		setCallStatus,
+		setIsRetryingCompletedLesson,
+	]);
+
+	const retryReviewedLesson = useCallback(() => {
+		if (lesson && lessonReview) {
+			markLessonCompleted(lesson.languageCode, lesson.id, lesson.xpReward, lessonReview);
+		}
+		resetLessonForRetry();
+	}, [lesson, lessonReview, markLessonCompleted, resetLessonForRetry]);
+
+	const finishPracticeAnyway = useCallback(() => {
+		if (isFinishingLesson) {
+			return;
+		}
+
+		didRequestFinishLessonRef.current = true;
+		setIsLessonInfoVisible(false);
+		setIsFinishingLesson(true);
+		finishTeachingSession(
+			activeLessonReadyReview ??
+				buildHonestLessonReview(reviewAttemptCount, completedPracticeTargetCount, targetCount),
+		).catch((error) => {
+			setIsFinishingLesson(false);
+			setCallStatus("error");
+			setCallError(error instanceof Error ? error.message : "Unable to finish the audio lesson.");
+		});
+	}, [
+		activeLessonReadyReview,
+		completedPracticeTargetCount,
+		finishTeachingSession,
+		isFinishingLesson,
+		reviewAttemptCount,
+		setCallError,
+		setCallStatus,
+		setIsLessonInfoVisible,
+		targetCount,
+	]);
+
+	const retryCompletedLesson = useCallback(() => {
+		resetLessonForRetry();
+	}, [resetLessonForRetry]);
 
 	if (!lesson) {
 		return (
@@ -1454,64 +1689,109 @@ export default function AudioLessonScreen() {
 			<SafeAreaView style={styles.safeArea}>
 				<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 				<View style={styles.reviewScreen}>
-					<View style={styles.reviewHero}>
-						<Image source={images.mascotWelcome} style={styles.reviewMascot} contentFit="contain" />
-						<View style={styles.reviewBadge}>
-							<Ionicons name="sparkles" size={28} color="#FFFFFF" />
+					<ScrollView
+						style={styles.lessonResultScroll}
+						contentContainerStyle={styles.lessonResultContent}
+						showsVerticalScrollIndicator={false}
+					>
+						<View style={styles.reviewHero}>
+							<Image
+								source={images.mascotWelcome}
+								style={styles.reviewMascot}
+								contentFit="contain"
+							/>
+							<View style={styles.reviewBadge}>
+								<Ionicons name="sparkles" size={28} color="#FFFFFF" />
+							</View>
 						</View>
-					</View>
 
-					<Text className="mt-6 text-center font-poppins-bold text-[28px] leading-[34px] text-neutral-primary">
-						Results & insights
-					</Text>
-					<Text className="mt-2 text-center font-poppins-medium text-[15px] leading-[22px] text-[#64708D]">
-						Your {lesson.title} practice is ready to finish.
-					</Text>
+						<Text className="mt-6 text-center font-poppins-bold text-[28px] leading-[34px] text-neutral-primary">
+							Practice review
+						</Text>
+						<Text className="mt-2 text-center font-poppins-medium text-[15px] leading-[22px] text-[#64708D]">
+							Your {lesson.title} practice is ready to finish.
+						</Text>
 
-					<View style={styles.feedbackCard}>
-						{getLessonReviewInsightCards(lessonReview).map((card, index) => (
-							<View key={card.label} className="flex-1 flex-row items-center">
-								<View style={styles.feedbackColumn}>
-									<Text
-										adjustsFontSizeToFit
-										className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary"
-										minimumFontScale={0.72}
-										numberOfLines={1}
-									>
-										{card.label}
-									</Text>
-									<Text
-										className="mt-2 text-center font-poppins-bold text-[15px] leading-[21px]"
-										style={{ color: card.color }}
-									>
-										{card.value}
+						<View style={styles.feedbackCard}>
+							{getLessonReviewInsightCards(lessonReview).map((card, index) => (
+								<View key={card.label} className="flex-1 flex-row items-center">
+									<View style={styles.feedbackColumn}>
+										<Text
+											adjustsFontSizeToFit
+											className="text-center font-poppins-bold text-[12px] leading-[17px] text-neutral-primary"
+											minimumFontScale={0.68}
+											numberOfLines={1}
+										>
+											{card.label}
+										</Text>
+										<Text
+											adjustsFontSizeToFit
+											className="mt-1.5 text-center font-poppins-bold text-[13px] leading-[18px]"
+											minimumFontScale={0.62}
+											numberOfLines={1}
+											style={{ color: card.color }}
+										>
+											{card.value}
+										</Text>
+									</View>
+									{index < 2 ? <View style={styles.feedbackDivider} /> : null}
+								</View>
+							))}
+						</View>
+
+						<View style={styles.reviewCommentCard}>
+							{lessonReview.comments.map((comment) => (
+								<View key={comment} className="flex-row items-start gap-3">
+									<Ionicons name="checkmark-circle" size={18} color="#21C16B" />
+									<Text className="flex-1 font-poppins-medium text-[13px] leading-[19px] text-[#58617E]">
+										{comment}
 									</Text>
 								</View>
-								{index < 2 ? <View style={styles.feedbackDivider} /> : null}
-							</View>
-						))}
-					</View>
+							))}
+						</View>
 
-					<View style={styles.reviewCommentCard}>
-						{lessonReview.comments.map((comment) => (
-							<View key={comment} className="flex-row items-start gap-3">
-								<Ionicons name="checkmark-circle" size={18} color="#21C16B" />
-								<Text className="flex-1 font-poppins-medium text-[13px] leading-[19px] text-[#58617E]">
-									{comment}
+						<View style={styles.completedRewardCard}>
+							<View>
+								<Text className="font-poppins-bold text-[14px] leading-[19px] text-neutral-primary">
+									XP earned
+								</Text>
+								<Text className="mt-1 font-poppins-medium text-[12px] leading-[17px] text-[#64708D]">
+									Saved when you leave or retry.
 								</Text>
 							</View>
-						))}
-					</View>
+							<Text className="font-poppins-bold text-[30px] leading-[36px] text-lingua-purple">
+								+{lesson.xpReward}
+							</Text>
+						</View>
+					</ScrollView>
 
-					<TouchableOpacity
-						accessibilityLabel="Save lesson progress"
-						accessibilityRole="button"
-						activeOpacity={0.86}
-						style={styles.completedPrimaryButton}
-						onPress={completeReviewedLesson}
+					<View
+						style={[
+							styles.lessonResultActionRow,
+							{ paddingBottom: Math.max(insets.bottom + 8, 18) },
+						]}
 					>
-						<Text className="font-poppins-bold text-[16px] text-white">Finish lesson</Text>
-					</TouchableOpacity>
+						<TouchableOpacity
+							accessibilityLabel="Save lesson progress and go back to lessons"
+							accessibilityRole="button"
+							activeOpacity={0.76}
+							style={[styles.completedSecondaryButton, styles.lessonResultActionButton]}
+							onPress={completeReviewedLesson}
+						>
+							<Text className="font-poppins-bold text-[15px] text-lingua-purple">
+								Back to lessons
+							</Text>
+						</TouchableOpacity>
+						<TouchableOpacity
+							accessibilityLabel="Save progress and try lesson again"
+							accessibilityRole="button"
+							activeOpacity={0.86}
+							style={[styles.completedPrimaryButton, styles.lessonResultActionButton]}
+							onPress={retryReviewedLesson}
+						>
+							<Text className="font-poppins-bold text-[15px] text-white">Try again</Text>
+						</TouchableOpacity>
+					</View>
 				</View>
 			</SafeAreaView>
 		);
@@ -1534,89 +1814,96 @@ export default function AudioLessonScreen() {
 						<Ionicons name="chevron-back" size={34} color="#0D132B" />
 					</TouchableOpacity>
 
-					<View style={styles.completedHero}>
-						<Image
-							source={images.mascotWelcome}
-							style={styles.completedMascot}
-							contentFit="contain"
-						/>
-						<View style={styles.completedCheckBadge}>
-							<Ionicons name="checkmark" size={34} color="#FFFFFF" />
+					<ScrollView
+						style={styles.lessonResultScroll}
+						contentContainerStyle={styles.lessonResultContent}
+						showsVerticalScrollIndicator={false}
+					>
+						<View style={styles.completedHero}>
+							<Image
+								source={images.mascotWelcome}
+								style={styles.completedMascot}
+								contentFit="contain"
+							/>
+							<View style={styles.completedCheckBadge}>
+								<Ionicons name="checkmark" size={34} color="#FFFFFF" />
+							</View>
 						</View>
-					</View>
 
-					<Text className="mt-6 text-center font-poppins-bold text-[28px] leading-[34px] text-neutral-primary">
-						Results & insights
-					</Text>
-					<Text className="mt-2 text-center font-poppins-medium text-[15px] leading-[22px] text-[#64708D]">
-						{lesson.title} is saved in your progress.
-					</Text>
-					<View style={styles.feedbackCard}>
-						{getLessonReviewInsightCards(completedReview).map((card, index) => (
-							<View key={card.label} className="flex-1 flex-row items-center">
-								<View style={styles.feedbackColumn}>
-									<Text
-										adjustsFontSizeToFit
-										className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary"
-										minimumFontScale={0.72}
-										numberOfLines={1}
-									>
-										{card.label}
-									</Text>
-									<Text
-										className="mt-2 text-center font-poppins-bold text-[15px] leading-[21px]"
-										style={{ color: card.color }}
-									>
-										{card.value}
+						<Text className="mt-6 text-center font-poppins-bold text-[28px] leading-[34px] text-neutral-primary">
+							Results & insights
+						</Text>
+						<Text className="mt-2 text-center font-poppins-medium text-[15px] leading-[22px] text-[#64708D]">
+							{lesson.title} is saved in your progress.
+						</Text>
+						<View style={styles.feedbackCard}>
+							{getLessonReviewInsightCards(completedReview).map((card, index) => (
+								<View key={card.label} className="flex-1 flex-row items-center">
+									<View style={styles.feedbackColumn}>
+										<Text
+											adjustsFontSizeToFit
+											className="text-center font-poppins-bold text-[14px] leading-[20px] text-neutral-primary"
+											minimumFontScale={0.72}
+											numberOfLines={1}
+										>
+											{card.label}
+										</Text>
+										<Text
+											adjustsFontSizeToFit
+											className="mt-2 text-center font-poppins-bold text-[13px] leading-[18px]"
+											minimumFontScale={0.58}
+											numberOfLines={1}
+											style={{ color: card.color }}
+										>
+											{card.value}
+										</Text>
+									</View>
+									{index < 2 ? <View style={styles.feedbackDivider} /> : null}
+								</View>
+							))}
+						</View>
+						<View style={styles.reviewCommentCard}>
+							{completedReview.comments.map((comment) => (
+								<View key={comment} className="flex-row items-start gap-3">
+									<Ionicons name="checkmark-circle" size={18} color="#21C16B" />
+									<Text className="flex-1 font-poppins-medium text-[13px] leading-[19px] text-[#58617E]">
+										{comment}
 									</Text>
 								</View>
-								{index < 2 ? <View style={styles.feedbackDivider} /> : null}
-							</View>
-						))}
-					</View>
-					<View style={styles.reviewCommentCard}>
-						{completedReview.comments.map((comment) => (
-							<View key={comment} className="flex-row items-start gap-3">
-								<Ionicons name="checkmark-circle" size={18} color="#21C16B" />
-								<Text className="flex-1 font-poppins-medium text-[13px] leading-[19px] text-[#58617E]">
-									{comment}
-								</Text>
-							</View>
-						))}
-					</View>
-					<View style={styles.completedRewardCard}>
-						<View>
-							<Text className="font-poppins-bold text-[14px] leading-[19px] text-neutral-primary">
-								XP earned
-							</Text>
-							<Text className="mt-1 font-poppins-medium text-[12px] leading-[17px] text-[#64708D]">
-								You can practice again anytime.
-							</Text>
+							))}
 						</View>
-						<Text className="font-poppins-bold text-[30px] leading-[36px] text-lingua-purple">
-							+{lesson.xpReward}
+						<Text className="mt-3 text-center font-poppins-medium text-[12px] leading-[17px] text-[#64708D]">
+							You already earned XP for this lesson.
 						</Text>
+					</ScrollView>
+
+					<View
+						style={[
+							styles.lessonResultActionRow,
+							{ paddingBottom: Math.max(insets.bottom + 8, 18) },
+						]}
+					>
+						<TouchableOpacity
+							accessibilityLabel="Back to lessons"
+							accessibilityRole="button"
+							activeOpacity={0.76}
+							style={[styles.completedSecondaryButton, styles.lessonResultActionButton]}
+							onPress={() => router.replace("/(tabs)/learn")}
+						>
+							<Text className="font-poppins-bold text-[15px] text-lingua-purple">
+								Back to lessons
+							</Text>
+						</TouchableOpacity>
+						<TouchableOpacity
+							accessibilityLabel="Try lesson again"
+							accessibilityRole="button"
+							activeOpacity={0.86}
+							style={[styles.completedPrimaryButton, styles.lessonResultActionButton]}
+							onPress={retryCompletedLesson}
+						>
+							<Text className="font-poppins-bold text-[15px] text-white">Try again</Text>
+						</TouchableOpacity>
 					</View>
-					<TouchableOpacity
-						accessibilityLabel="Try lesson again"
-						accessibilityRole="button"
-						activeOpacity={0.86}
-						style={styles.completedPrimaryButton}
-						onPress={retryCompletedLesson}
-					>
-						<Text className="font-poppins-bold text-[16px] text-white">Try again</Text>
-					</TouchableOpacity>
-					<TouchableOpacity
-						accessibilityLabel="Back to lessons"
-						accessibilityRole="button"
-						activeOpacity={0.76}
-						style={styles.completedSecondaryButton}
-						onPress={() => router.replace("/(tabs)/learn")}
-					>
-						<Text className="font-poppins-bold text-[16px] text-lingua-purple">
-							Back to lessons
-						</Text>
-					</TouchableOpacity>
 				</View>
 			</SafeAreaView>
 		);
@@ -1656,16 +1943,12 @@ export default function AudioLessonScreen() {
 				: isMicOpen
 					? { backgroundColor: "#19CC33", borderColor: "rgba(25, 204, 51, 0.2)" }
 					: { backgroundColor: "rgba(13, 19, 43, 0.64)", borderColor: "rgba(255, 255, 255, 0.72)" };
-	const shouldShowTargetPractice = !activeLessonReadyReview;
-	const teacherBubbleText = activeLessonReadyReview
-		? "That wraps this practice."
-		: isTeacherThinking
-			? "Checking your pronunciation..."
-			: isTeacherTalking && !latestTeacherSpeechText
-				? "AI Teacher is speaking..."
-				: displayTargetItem
-					? "Say this out loud."
-					: null;
+	const shouldShowReadyToFinishPrompt =
+		Boolean(activeLessonReadyReview) &&
+		isFinishPromptUnlocked &&
+		isJoined &&
+		agentStatus === "connected";
+	const shouldShowTargetPractice = !shouldShowReadyToFinishPrompt || isReviewingFinishTarget;
 	// Derive a human-readable label that reflects every possible button state
 	const pushToTalkLabel = isMicOpen
 		? "Release to stop"
@@ -1723,12 +2006,12 @@ export default function AudioLessonScreen() {
 					: "#A8AFBF";
 	const agentStatusLabel =
 		agentStatus === "connecting"
-			? "AI teacher connecting"
+			? "Teacher connecting"
 			: agentStatus === "connected"
-				? "AI teacher connected"
+				? "Teacher connected"
 				: agentStatus === "failed"
-					? "AI teacher failed"
-					: "AI teacher idle";
+					? "Teacher failed"
+					: "Teacher idle";
 	const agentStatusDotColor =
 		agentStatus === "connected"
 			? "#18D313"
@@ -1739,13 +2022,36 @@ export default function AudioLessonScreen() {
 					: "#A8AFBF";
 	const primaryGoal = lesson.goals[0]?.text ?? lesson.description;
 	const lessonArtworkSource = getLessonArtworkSource(lesson.id);
+	const displayTargetTerm = displayTargetItem
+		? "term" in displayTargetItem
+			? displayTargetItem.term
+			: displayTargetItem.text
+		: "";
+	const displayTargetPartOfSpeech =
+		displayTargetItem &&
+		"partOfSpeech" in displayTargetItem &&
+		typeof displayTargetItem.partOfSpeech === "string"
+			? displayTargetItem.partOfSpeech
+			: null;
+	const displayTargetExample =
+		displayTargetItem &&
+		"example" in displayTargetItem &&
+		typeof displayTargetItem.example === "string"
+			? displayTargetItem.example
+			: null;
+	const displayTargetContext =
+		displayTargetItem &&
+		"context" in displayTargetItem &&
+		typeof displayTargetItem.context === "string"
+			? displayTargetItem.context
+			: null;
 
 	return (
 		<SafeAreaView style={styles.safeArea}>
 			<StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
 
 			<View style={[styles.screenContent, { paddingBottom: 104 + insets.bottom }]}>
-				<View className="flex-row items-center pb-4 pt-2">
+				<View className="flex-row items-center pb-2 pt-1.5">
 					<TouchableOpacity
 						accessibilityLabel="Go back"
 						accessibilityRole="button"
@@ -1760,15 +2066,14 @@ export default function AudioLessonScreen() {
 						<Text className="font-poppins-bold text-[25px] leading-[31px] text-neutral-primary">
 							AI Teacher
 						</Text>
-						<View className="mt-1 flex-row items-center gap-2">
-							<View style={[styles.callStatusDot, { backgroundColor: callStatusDotColor }]} />
-							<Text className="font-poppins-medium text-[17px] leading-[22px] text-[#58617E]">
+						<View className="mt-0.5 flex-row flex-wrap items-center gap-1.5">
+							<View style={[styles.statusDot, { backgroundColor: callStatusDotColor }]} />
+							<Text className="font-poppins-semibold text-[13px] leading-[18px] text-[#58617E]">
 								{callStatusLabel}
 							</Text>
-						</View>
-						<View className="mt-1 flex-row items-center gap-2">
-							<View style={[styles.agentStatusDot, { backgroundColor: agentStatusDotColor }]} />
-							<Text className="font-poppins-medium text-[12px] leading-[16px] text-[#7B849B]">
+							<Text className="font-poppins-bold text-[12px] leading-[17px] text-[#A8AFBF]">•</Text>
+							<View style={[styles.statusDot, { backgroundColor: agentStatusDotColor }]} />
+							<Text className="font-poppins-semibold text-[13px] leading-[18px] text-[#58617E]">
 								{agentStatusLabel}
 							</Text>
 						</View>
@@ -1807,16 +2112,14 @@ export default function AudioLessonScreen() {
 										className="font-poppins-bold text-[10px] leading-[14px] text-white"
 										numberOfLines={1}
 									>
-										Practice {displayTargetNumber}/{targetCount}
+										Word {activeTargetPositionCount}/{targetCount}
 									</Text>
-									{progressAttemptLabel ? (
-										<Text
-											className="font-poppins-bold text-[10px] leading-[14px] text-white/85"
-											numberOfLines={1}
-										>
-											{progressAttemptLabel}
-										</Text>
-									) : null}
+									<Text
+										className="font-poppins-bold text-[10px] leading-[14px] text-white/85"
+										numberOfLines={1}
+									>
+										{currentTargetAttemptLabel}
+									</Text>
 									<Ionicons name="flag-outline" size={13} color="#FFFFFF" />
 								</View>
 								<View style={styles.lessonProgressTrack}>
@@ -1824,6 +2127,32 @@ export default function AudioLessonScreen() {
 										style={[styles.lessonProgressFill, { width: `${lessonProgressPercent}%` }]}
 									/>
 								</View>
+								{shouldShowDonePracticingControl ? (
+									<TouchableOpacity
+										activeOpacity={0.86}
+										accessibilityLabel="Finish lesson practice"
+										accessibilityRole="button"
+										accessibilityState={
+											!canPressFinishLesson || isFinishingLesson ? { disabled: true } : undefined
+										}
+										disabled={!canPressFinishLesson || isFinishingLesson}
+										style={[
+											styles.finishProgressButton,
+											(!canPressFinishLesson || isFinishingLesson) &&
+												styles.finishProgressButtonDisabled,
+										]}
+										onPress={finishPracticeAnyway}
+									>
+										{isFinishingLesson ? (
+											<ActivityIndicator size="small" color="#FFFFFF" />
+										) : (
+											<Ionicons name="checkmark" size={15} color="#FFFFFF" />
+										)}
+										<Text className="font-poppins-bold text-[11px] leading-[15px] text-white">
+											{isFinishingLesson ? "Finishing..." : "Finish Lesson"}
+										</Text>
+									</TouchableOpacity>
+								) : null}
 							</View>
 						) : null}
 					</View>
@@ -1835,118 +2164,109 @@ export default function AudioLessonScreen() {
 					/>
 
 					{/* Keep the current target visible so the learner always knows what to say. */}
-					{teacherBubbleText || (shouldShowTargetPractice && displayTargetItem)
-						? (() => {
-								return (
-									<View
-										style={[
-											styles.responseBubble,
-											isCompactLessonView
-												? styles.responseBubbleCompact
-												: styles.responseBubbleRegular,
-										]}
-									>
-										<View className="flex-1">
-											<View className="gap-2.5">
-												{isTeacherThinking ? (
-													<Text className="font-poppins-semibold text-[16px] leading-[22px] text-[#7B849B]">
-														{teacherBubbleText}
-													</Text>
-												) : isTeacherTalking && !latestTeacherSpeechText ? (
-													<Text className="font-poppins-semibold text-[16px] leading-[22px] text-[#7B849B]">
-														{teacherBubbleText}
-													</Text>
-												) : latestTeacherSpeechText ? (
-													<Text className="font-poppins-semibold text-[15px] leading-[21px] text-neutral-primary">
-														{teacherBubbleText}
-													</Text>
-												) : (
-													<Text className="font-poppins-semibold text-[14px] leading-[20px] text-[#7B849B]">
-														Say this word out loud.
-													</Text>
-												)}
-
-												{shouldShowTargetPractice && displayTargetItem
-													? (() => {
-															const term =
-																"term" in displayTargetItem
-																	? displayTargetItem.term
-																	: displayTargetItem.text;
-															const pronunciation = displayTargetItem.pronunciation;
-															const translation = displayTargetItem.translation;
-															const partOfSpeech =
-																"partOfSpeech" in displayTargetItem &&
-																typeof displayTargetItem.partOfSpeech === "string"
-																	? displayTargetItem.partOfSpeech
-																	: null;
-															const example =
-																"example" in displayTargetItem &&
-																typeof displayTargetItem.example === "string"
-																	? displayTargetItem.example
-																	: null;
-															const context =
-																"context" in displayTargetItem &&
-																typeof displayTargetItem.context === "string"
-																	? displayTargetItem.context
-																	: null;
-
-															return (
-																<View className="border-t border-[#EEEFF4] pt-2 gap-1">
-																	<View className="flex-row items-center flex-wrap gap-2">
-																		<Text className="font-poppins-bold text-[18px] leading-[24px] text-[#6C4EF5]">
-																			{term}
-																		</Text>
-																		{partOfSpeech ? (
-																			<View className="bg-lingua-purple/10 px-2 py-0.5 rounded-md">
-																				<Text className="font-poppins-bold text-[9px] leading-[13px] text-[#6C4EF5] uppercase">
-																					{partOfSpeech}
-																				</Text>
-																			</View>
-																		) : (
-																			<View className="bg-blue-50 px-2 py-0.5 rounded-md">
-																				<Text className="font-poppins-bold text-[9px] leading-[13px] text-blue-600 uppercase">
-																					phrase
-																				</Text>
-																			</View>
-																		)}
-																	</View>
-
-																	<View className="flex-row items-center flex-wrap gap-1.5 mt-0.5">
-																		{pronunciation ? (
-																			<Text className="font-poppins-bold text-[12px] leading-[17px] text-[#FF8A00] bg-[#FFF5E6] px-1.5 py-0.5 rounded">
-																				/{pronunciation}/
-																			</Text>
-																		) : null}
-																		<Text className="font-poppins-medium text-[12px] leading-[17px] text-[#58617E]">
-																			means
-																		</Text>
-																		<Text className="font-poppins-bold text-[13px] leading-[18px] text-[#19CC33]">
-																			{'"' + translation + '"'}
-																		</Text>
-																	</View>
-
-																	{example ? (
-																		<Text className="mt-1 font-poppins-medium italic text-[11px] leading-[16px] text-[#58617E] bg-[#F7F8FA] p-2 rounded-lg border-l-2 border-[#6C4EF5]">
-																			{'"' + example + '"'}
-																		</Text>
-																	) : null}
-
-																	{context ? (
-																		<Text className="mt-1 font-poppins-medium italic text-[11px] leading-[16px] text-[#58617E] bg-[#F7F8FA] p-2 rounded-lg border-l-2 border-blue-500">
-																			💡 {context}
-																		</Text>
-																	) : null}
-																</View>
-															);
-														})()
-													: null}
+					{shouldShowTargetPractice && displayTargetItem ? (
+						<TouchableOpacity
+							accessibilityLabel={
+								shouldShowReadyToFinishPrompt
+									? "Return to lesson completion message"
+									: "Current lesson word"
+							}
+							accessibilityRole={shouldShowReadyToFinishPrompt ? "button" : undefined}
+							activeOpacity={shouldShowReadyToFinishPrompt ? 0.86 : 1}
+							disabled={!shouldShowReadyToFinishPrompt}
+							style={[
+								styles.responseBubble,
+								isCompactLessonView ? styles.responseBubbleCompact : styles.responseBubbleRegular,
+							]}
+							onPress={() => setIsReviewingFinishTarget(false)}
+						>
+							<View className="flex-1">
+								<View className="gap-1">
+									<View className="flex-row items-center flex-wrap gap-2">
+										<Text className="font-poppins-bold text-[18px] leading-[24px] text-[#6C4EF5]">
+											{displayTargetTerm}
+										</Text>
+										{displayTargetPartOfSpeech ? (
+											<View className="bg-lingua-purple/10 px-2 py-0.5 rounded-md">
+												<Text className="font-poppins-bold text-[9px] leading-[13px] text-[#6C4EF5] uppercase">
+													{displayTargetPartOfSpeech}
+												</Text>
 											</View>
-										</View>
-										<View style={styles.bubbleTail} />
+										) : (
+											<View className="bg-blue-50 px-2 py-0.5 rounded-md">
+												<Text className="font-poppins-bold text-[9px] leading-[13px] text-blue-600 uppercase">
+													phrase
+												</Text>
+											</View>
+										)}
 									</View>
-								);
-							})()
-						: null}
+
+									<View className="mt-0.5">
+										{displayTargetItem.pronunciation ? (
+											<Text className="self-start font-poppins-bold text-[12px] leading-[17px] text-[#FF8A00] bg-[#FFF5E6] px-1.5 py-0.5 rounded">
+												/{displayTargetItem.pronunciation}/
+											</Text>
+										) : null}
+										<Text className="mt-1 font-poppins-bold text-[14px] leading-[19px] text-[#19CC33]">
+											means {'"' + displayTargetItem.translation + '"'}
+										</Text>
+									</View>
+
+									{displayTargetExample ? (
+										<Text className="mt-1 font-poppins-medium italic text-[11px] leading-[16px] text-[#58617E] bg-[#F7F8FA] p-2 rounded-lg border-l-2 border-[#6C4EF5]">
+											{'"' + displayTargetExample + '"'}
+										</Text>
+									) : null}
+
+									{displayTargetContext ? (
+										<Text className="mt-1 font-poppins-medium italic text-[11px] leading-[16px] text-[#58617E] bg-[#F7F8FA] p-2 rounded-lg border-l-2 border-blue-500">
+											💡 {displayTargetContext}
+										</Text>
+									) : null}
+
+									{shouldShowReadyToFinishPrompt ? (
+										<Text className="mt-1 text-right font-poppins-semibold text-[10px] leading-[14px] text-[#7B849B]">
+											Tap to return
+										</Text>
+									) : null}
+								</View>
+							</View>
+							<View style={styles.bubbleTail} />
+						</TouchableOpacity>
+					) : null}
+					{shouldShowReadyToFinishPrompt && !isReviewingFinishTarget ? (
+						<TouchableOpacity
+							accessibilityLabel="Review the last lesson word"
+							accessibilityRole="button"
+							activeOpacity={0.86}
+							style={[
+								styles.responseBubble,
+								styles.finishPromptBubble,
+								isCompactLessonView
+									? styles.finishPromptBubbleCompact
+									: styles.finishPromptBubbleRegular,
+							]}
+							onPress={() => setIsReviewingFinishTarget(true)}
+						>
+							<View className="flex-row items-start gap-3">
+								<View style={styles.finishPromptIcon}>
+									<Ionicons name="checkmark" size={18} color="#FFFFFF" />
+								</View>
+								<View className="flex-1">
+									<Text className="font-poppins-bold text-[16px] leading-[22px] text-neutral-primary">
+										Great work!
+									</Text>
+									<Text className="mt-1 font-poppins-medium text-[12px] leading-[17px] text-[#58617E]">
+										Tap Finish Lesson to continue.
+									</Text>
+									<Text className="mt-1 font-poppins-semibold text-[10px] leading-[14px] text-[#7B849B]">
+										Tap to review the word
+									</Text>
+								</View>
+							</View>
+							<View style={styles.bubbleTail} />
+						</TouchableOpacity>
+					) : null}
 
 					{callError || agentError ? (
 						<View style={styles.callErrorCard}>
@@ -1961,10 +2281,6 @@ export default function AudioLessonScreen() {
 						style={[
 							styles.liveCaptionsPanel,
 							isCompactLessonView && styles.liveCaptionsPanelCompact,
-							shouldShowReadyToFinishControls && styles.liveCaptionsPanelReady,
-							shouldShowReadyToFinishControls &&
-								isCompactLessonView &&
-								styles.liveCaptionsPanelReadyCompact,
 						]}
 					>
 						<View className="mb-2 flex-row items-center justify-between">
@@ -1994,7 +2310,10 @@ export default function AudioLessonScreen() {
 									>
 										{caption.speakerLabel}
 									</Text>
-									<Text className="flex-1 font-poppins-semibold text-[12px] leading-[17px] text-white">
+									<Text
+										className="flex-1 font-poppins-semibold text-[12px] leading-[17px] text-white"
+										numberOfLines={2}
+									>
 										{formatCaptionForReading(caption.text)}
 									</Text>
 								</View>
@@ -2007,30 +2326,6 @@ export default function AudioLessonScreen() {
 					</View>
 
 					<View style={styles.pushToTalkDock}>
-						{shouldShowReadyToFinishControls ? (
-							<View style={styles.readyFinishPanel}>
-								<View className="flex-1">
-									<Text className="font-poppins-bold text-[14px] leading-[19px] text-white">
-										Ready to finish
-									</Text>
-									<Text className="font-poppins-medium text-[10px] leading-[14px] text-white/80">
-										Repeat again or save your progress.
-									</Text>
-								</View>
-								<TouchableOpacity
-									activeOpacity={0.86}
-									accessibilityLabel="Finish lesson"
-									accessibilityRole="button"
-									style={styles.readyFinishButton}
-									onPress={finishReadyLesson}
-								>
-									<Ionicons name="checkmark-circle" size={18} color="#FFFFFF" />
-									<Text className="font-poppins-bold text-[13px] leading-[17px] text-white">
-										Finish
-									</Text>
-								</TouchableOpacity>
-							</View>
-						) : null}
 						<View style={styles.talkControlRow}>
 							<TouchableOpacity
 								accessibilityLabel="Open lesson info"
@@ -2068,16 +2363,12 @@ export default function AudioLessonScreen() {
 							</TouchableOpacity>
 							<View style={styles.infoControlSpacer} />
 						</View>
-						{shouldShowReadyToFinishControls ? null : (
-							<>
-								<Text className="mt-3 text-center font-poppins-bold text-[16px] leading-[22px] text-white">
-									{pushToTalkLabel}
-								</Text>
-								<Text className="mt-1 text-center font-poppins-medium text-[11px] leading-[15px] text-white/80">
-									{pushToTalkSubLabel}
-								</Text>
-							</>
-						)}
+						<Text className="mt-3 text-center font-poppins-bold text-[16px] leading-[22px] text-white">
+							{pushToTalkLabel}
+						</Text>
+						<Text className="mt-1 text-center font-poppins-medium text-[11px] leading-[15px] text-white/80">
+							{pushToTalkSubLabel}
+						</Text>
 						{isTeacherThinking ? (
 							<TouchableOpacity
 								activeOpacity={0.82}
@@ -2205,7 +2496,7 @@ const styles = StyleSheet.create({
 	},
 	screenContent: {
 		flex: 1,
-		justifyContent: "space-between",
+		justifyContent: "flex-start",
 		paddingHorizontal: 14,
 		backgroundColor: "#FFFFFF",
 	},
@@ -2217,15 +2508,10 @@ const styles = StyleSheet.create({
 		backgroundColor: "#6C4EF5",
 		paddingHorizontal: 24,
 	},
-	callStatusDot: {
+	statusDot: {
 		width: 13,
 		height: 13,
 		borderRadius: 7,
-	},
-	agentStatusDot: {
-		width: 9,
-		height: 9,
-		borderRadius: 5,
 	},
 	teacherStage: {
 		overflow: "hidden",
@@ -2263,6 +2549,7 @@ const styles = StyleSheet.create({
 		right: 16,
 		zIndex: 4,
 		gap: 8,
+		alignItems: "stretch",
 	},
 	lessonStatePill: {
 		minWidth: 112,
@@ -2282,7 +2569,7 @@ const styles = StyleSheet.create({
 		backgroundColor: "#6C4EF5",
 	},
 	lessonProgressPill: {
-		minWidth: 142,
+		minWidth: 156,
 		borderWidth: 1,
 		borderColor: "rgba(255, 255, 255, 0.38)",
 		borderRadius: 14,
@@ -2308,26 +2595,42 @@ const styles = StyleSheet.create({
 		borderRadius: 999,
 		backgroundColor: "#21C16B",
 	},
+	finishProgressButton: {
+		minHeight: 36,
+		marginTop: 9,
+		flexDirection: "row",
+		alignItems: "center",
+		justifyContent: "center",
+		gap: 6,
+		borderRadius: 999,
+		backgroundColor: "#21C16B",
+		paddingHorizontal: 12,
+		paddingVertical: 8,
+		boxShadow: "0 10px 20px rgba(33, 193, 107, 0.26)",
+	},
+	finishProgressButtonDisabled: {
+		opacity: 0.72,
+	},
 	teacherMascot: {
 		position: "absolute",
-		bottom: 276,
-		left: -2,
+		bottom: 246,
+		left: 12,
 		zIndex: 4,
-		width: 126,
-		height: 126,
+		width: 124,
+		height: 124,
 	},
 	teacherMascotCompact: {
-		bottom: 226,
-		left: -4,
-		width: 104,
-		height: 104,
+		bottom: 194,
+		left: 8,
+		width: 98,
+		height: 98,
 	},
 	responseBubble: {
 		position: "absolute",
-		right: 24,
-		left: 104,
-		minHeight: 104,
-		maxHeight: 230,
+		right: 20,
+		left: 118,
+		minHeight: 96,
+		maxHeight: 190,
 		zIndex: 3,
 		flexDirection: "row",
 		alignItems: "center",
@@ -2335,34 +2638,57 @@ const styles = StyleSheet.create({
 		borderColor: "#EEEFF4",
 		borderRadius: 20,
 		backgroundColor: "#FFFFFF",
-		paddingHorizontal: 16,
-		paddingVertical: 12,
+		paddingHorizontal: 22,
+		paddingVertical: 18,
 		boxShadow: "0 8px 22px rgba(22, 24, 40, 0.14)",
 	},
 	responseBubbleRegular: {
-		bottom: 312,
+		bottom: 318,
 	},
 	responseBubbleCompact: {
-		top: 112,
+		top: 82,
 		right: 14,
-		left: 90,
+		left: 94,
 		minHeight: 82,
-		maxHeight: 108,
-		paddingHorizontal: 12,
-		paddingVertical: 9,
+		maxHeight: 118,
+		paddingHorizontal: 16,
+		paddingVertical: 13,
 	},
 	bubbleTail: {
 		position: "absolute",
-		left: -18,
-		bottom: 34,
+		left: -13,
+		bottom: 12,
 		width: 0,
 		height: 0,
-		borderTopWidth: 14,
-		borderBottomWidth: 14,
-		borderRightWidth: 20,
+		borderTopWidth: 13,
+		borderBottomWidth: 13,
+		borderRightWidth: 18,
 		borderTopColor: "transparent",
 		borderBottomColor: "transparent",
 		borderRightColor: "#FFFFFF",
+	},
+	finishPromptBubble: {
+		minHeight: 86,
+		maxHeight: 108,
+		paddingHorizontal: 18,
+		paddingVertical: 14,
+	},
+	finishPromptBubbleRegular: {
+		bottom: 318,
+	},
+	finishPromptBubbleCompact: {
+		top: 90,
+		right: 14,
+		left: 94,
+		minHeight: 78,
+	},
+	finishPromptIcon: {
+		width: 34,
+		height: 34,
+		alignItems: "center",
+		justifyContent: "center",
+		borderRadius: 17,
+		backgroundColor: "#21C16B",
 	},
 	callErrorCard: {
 		position: "absolute",
@@ -2398,12 +2724,6 @@ const styles = StyleSheet.create({
 		maxHeight: 68,
 		paddingHorizontal: 12,
 		paddingVertical: 8,
-	},
-	liveCaptionsPanelReady: {
-		bottom: 182,
-	},
-	liveCaptionsPanelReadyCompact: {
-		bottom: 162,
 	},
 	captionPulse: {
 		width: 9,
@@ -2469,33 +2789,6 @@ const styles = StyleSheet.create({
 		width: 48,
 		height: 48,
 	},
-	readyFinishPanel: {
-		width: "100%",
-		minHeight: 58,
-		marginBottom: 8,
-		flexDirection: "row",
-		alignItems: "center",
-		gap: 12,
-		borderWidth: 1,
-		borderColor: "rgba(255, 255, 255, 0.28)",
-		borderRadius: 18,
-		backgroundColor: "rgba(13, 19, 43, 0.72)",
-		paddingHorizontal: 14,
-		paddingVertical: 10,
-		boxShadow: "0 10px 24px rgba(13, 19, 43, 0.24)",
-	},
-	readyFinishButton: {
-		minHeight: 40,
-		flexDirection: "row",
-		alignItems: "center",
-		justifyContent: "center",
-		gap: 7,
-		borderRadius: 999,
-		backgroundColor: "#21C16B",
-		paddingHorizontal: 16,
-		paddingVertical: 9,
-		boxShadow: "0 8px 18px rgba(33, 193, 107, 0.26)",
-	},
 	cancelResponseButton: {
 		marginTop: 10,
 		minHeight: 34,
@@ -2513,53 +2806,64 @@ const styles = StyleSheet.create({
 	reviewScreen: {
 		flex: 1,
 		alignItems: "center",
-		justifyContent: "center",
+		justifyContent: "space-between",
 		paddingHorizontal: 24,
+		paddingTop: 34,
 		backgroundColor: "#FFFFFF",
 	},
+	lessonResultContent: {
+		width: "100%",
+		alignItems: "center",
+		paddingBottom: 22,
+	},
+	lessonResultScroll: {
+		width: "100%",
+		flex: 1,
+	},
 	reviewHero: {
-		width: 174,
-		height: 174,
+		width: 154,
+		height: 154,
 		alignItems: "center",
 		justifyContent: "center",
-		borderRadius: 87,
+		borderRadius: 77,
 		backgroundColor: "#E9FBF0",
 	},
 	reviewMascot: {
-		width: 146,
-		height: 146,
+		width: 130,
+		height: 130,
 	},
 	reviewBadge: {
 		position: "absolute",
-		right: 8,
-		bottom: 12,
-		width: 54,
-		height: 54,
+		right: 6,
+		bottom: 10,
+		width: 48,
+		height: 48,
 		alignItems: "center",
 		justifyContent: "center",
 		borderWidth: 5,
 		borderColor: "#FFFFFF",
-		borderRadius: 27,
+		borderRadius: 24,
 		backgroundColor: "#6C4EF5",
 	},
 	reviewCommentCard: {
 		width: "100%",
 		gap: 12,
-		marginTop: 14,
-		marginBottom: 18,
+		marginTop: 12,
+		marginBottom: 12,
 		borderWidth: 1,
 		borderColor: "#ECEFF6",
 		borderRadius: 18,
 		backgroundColor: "#FFFFFF",
-		paddingHorizontal: 16,
-		paddingVertical: 16,
+		paddingHorizontal: 15,
+		paddingVertical: 14,
 		boxShadow: "0 8px 24px rgba(22, 24, 40, 0.07)",
 	},
 	completedScreen: {
 		flex: 1,
 		alignItems: "center",
-		justifyContent: "center",
+		justifyContent: "space-between",
 		paddingHorizontal: 24,
+		paddingTop: 58,
 		backgroundColor: "#FFFFFF",
 	},
 	completedBackButton: {
@@ -2572,34 +2876,34 @@ const styles = StyleSheet.create({
 		justifyContent: "center",
 	},
 	completedHero: {
-		width: 188,
-		height: 188,
+		width: 166,
+		height: 166,
 		alignItems: "center",
 		justifyContent: "center",
-		borderRadius: 94,
+		borderRadius: 83,
 		backgroundColor: "#F1EEFF",
 	},
 	completedMascot: {
-		width: 158,
-		height: 158,
+		width: 140,
+		height: 140,
 	},
 	completedCheckBadge: {
 		position: "absolute",
-		right: 10,
-		bottom: 14,
-		width: 58,
-		height: 58,
+		right: 8,
+		bottom: 12,
+		width: 52,
+		height: 52,
 		alignItems: "center",
 		justifyContent: "center",
 		borderWidth: 5,
 		borderColor: "#FFFFFF",
-		borderRadius: 29,
+		borderRadius: 26,
 		backgroundColor: "#21C16B",
 	},
 	completedRewardCard: {
 		width: "100%",
-		marginTop: 24,
-		marginBottom: 18,
+		marginTop: 0,
+		marginBottom: 12,
 		flexDirection: "row",
 		alignItems: "center",
 		justifyContent: "space-between",
@@ -2608,7 +2912,7 @@ const styles = StyleSheet.create({
 		borderRadius: 18,
 		backgroundColor: "#FFFFFF",
 		paddingHorizontal: 18,
-		paddingVertical: 16,
+		paddingVertical: 14,
 		boxShadow: "0 10px 28px rgba(22, 24, 40, 0.08)",
 	},
 	completedPrimaryButton: {
@@ -2623,11 +2927,24 @@ const styles = StyleSheet.create({
 	completedSecondaryButton: {
 		width: "100%",
 		height: 54,
-		marginTop: 10,
+		marginTop: 0,
 		alignItems: "center",
 		justifyContent: "center",
 		borderRadius: 18,
 		backgroundColor: "#F1EEFF",
+	},
+	lessonResultActionRow: {
+		width: "100%",
+		flexDirection: "row",
+		gap: 10,
+		paddingTop: 12,
+		backgroundColor: "#FFFFFF",
+	},
+	lessonResultActionButton: {
+		flex: 1,
+		width: "auto",
+		height: 54,
+		marginTop: 0,
 	},
 	feedbackColumn: {
 		flex: 1,
@@ -2637,17 +2954,18 @@ const styles = StyleSheet.create({
 	},
 	feedbackDivider: {
 		width: 1,
-		height: 60,
+		height: 46,
 		backgroundColor: "#E5E7F1",
 	},
 	feedbackCard: {
-		minHeight: 105,
-		marginTop: 16,
+		width: "100%",
+		minHeight: 86,
+		marginTop: 14,
 		flexDirection: "row",
 		alignItems: "center",
 		borderRadius: 22,
 		backgroundColor: "#FFFFFF",
-		paddingHorizontal: 14,
+		paddingHorizontal: 10,
 		boxShadow: "0 10px 28px rgba(22, 24, 40, 0.09)",
 	},
 	modalBackdrop: {
