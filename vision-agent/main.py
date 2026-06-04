@@ -209,6 +209,20 @@ def normalize_spoken_text(text: str) -> str:
     )
 
 
+def contains_spoken_token_sequence(normalized_transcript: str, normalized_target: str) -> bool:
+    transcript_tokens = normalized_transcript.split()
+    target_tokens = normalized_target.split()
+
+    if not target_tokens or len(target_tokens) > len(transcript_tokens):
+        return False
+
+    target_token_count = len(target_tokens)
+    return any(
+        transcript_tokens[index : index + target_token_count] == target_tokens
+        for index in range(len(transcript_tokens) - target_token_count + 1)
+    )
+
+
 def is_target_completed_by_transcript(target: dict[str, Any], transcript: str) -> bool:
     target_terms = [
         target.get("text"),
@@ -222,7 +236,7 @@ def is_target_completed_by_transcript(target: dict[str, Any], transcript: str) -
             continue
 
         normalized_target = normalize_spoken_text(term)
-        if normalized_target and normalized_target in normalized_transcript:
+        if contains_spoken_token_sequence(normalized_transcript, normalized_target):
             return True
 
     return False
@@ -587,10 +601,6 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
                         if isinstance(target_id, str):
                             completed_target_ids.add(target_id)
-                            current_target_index = min(
-                                max(current_target_index, matched_target_index + 1),
-                                len(lesson_targets) - 1,
-                            )
                     else:
                         current_target_index = fallback_target_index
                 has_pending_learner_feedback = True

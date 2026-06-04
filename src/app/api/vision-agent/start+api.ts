@@ -95,7 +95,9 @@ export async function POST(request: Request) {
 		try {
 			return Response.json(await startingSession, { status: 200 });
 		} catch {
-			clearStartingVisionAgentSession(body.callId);
+			if (getStartingVisionAgentSession(body.callId) === startingSession) {
+				clearStartingVisionAgentSession(body.callId);
+			}
 		}
 	}
 
@@ -147,7 +149,9 @@ export async function POST(request: Request) {
 		console.error("Vision Agent start failed:", error);
 		return jsonError("Unable to reach the AI teacher service.", 502);
 	} finally {
-		clearStartingVisionAgentSession(body.callId);
+		if (getStartingVisionAgentSession(body.callId) === startSessionPromise) {
+			clearStartingVisionAgentSession(body.callId);
+		}
 		clearTimeout(timeout);
 	}
 }
