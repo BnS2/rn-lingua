@@ -210,15 +210,33 @@ def normalize_spoken_text(text: str) -> str:
 
 
 def is_target_completed_by_transcript(target: dict[str, Any], transcript: str) -> bool:
-    target_text = target.get("text")
-
-    if not isinstance(target_text, str):
-        return False
-
-    normalized_target = normalize_spoken_text(target_text)
+    target_terms = [
+        target.get("text"),
+        target.get("translation"),
+        target.get("pronunciation"),
+    ]
     normalized_transcript = normalize_spoken_text(transcript)
 
-    return bool(normalized_target and normalized_target in normalized_transcript)
+    for term in target_terms:
+        if not isinstance(term, str):
+            continue
+
+        normalized_target = normalize_spoken_text(term)
+        if normalized_target and normalized_target in normalized_transcript:
+            return True
+
+    return False
+
+
+def find_completed_target_index(
+    lesson_targets: list[dict[str, Any]],
+    transcript: str,
+) -> Optional[int]:
+    for index, target in enumerate(lesson_targets):
+        if is_target_completed_by_transcript(target, transcript):
+            return index
+
+    return None
 
 
 def fetch_call_custom_data(call_type: str, call_id: str) -> dict[str, Any]:
@@ -314,7 +332,9 @@ Teaching style:
 - If you ask the learner to say a word or phrase, stop talking after the prompt so they have room to answer or interrupt.
 - After the learner speaks, give one specific piece of feedback about what they said, then ask for the next short attempt.
 - Work through the lesson vocabulary and phrases one at a time in the exact order listed above.
-- After the learner has attempted every lesson item, give a short, honest wrap-up: name one thing they practiced and one thing to repeat next time.
+- If the learner's attempt is unclear or does not sound like the current lesson word or phrase, correct it and ask them to repeat that same item again before moving on.
+- On the final lesson item, do not give the wrap-up until you have given feedback on the learner's final attempt and the attempt is acceptable.
+- After the learner has acceptably practiced every lesson item, give a short, honest wrap-up: name one thing they practiced and one thing to repeat next time.
 - After that wrap-up, stay available if the learner repeats a word, asks to try again, or needs one more correction.
 - Do not tell the learner the call is ending. The app will let them choose when to finish.
 - Keep each turn under 3 sentences unless the learner asks for more detail.
@@ -544,7 +564,7 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
         @agent.events.subscribe
         async def on_user_transcript(event: UserTranscriptEvent) -> None:
-            nonlocal has_pending_learner_feedback, learner_attempt_count
+            nonlocal current_target_index, has_pending_learner_feedback, learner_attempt_count
 
             speaker_id = get_participant_user_id(event.participant)
             await emit_caption_status(
@@ -559,14 +579,20 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
                 logger.info("Learner transcript: %s", event.text.strip())
                 learner_attempt_count += 1
                 if lesson_targets:
-                    target = lesson_targets[min(current_target_index, len(lesson_targets) - 1)]
-                    target_id = target.get("id")
+                    fallback_target_index = min(current_target_index, len(lesson_targets) - 1)
+                    matched_target_index = find_completed_target_index(lesson_targets, event.text)
+                    if matched_target_index is not None:
+                        target = lesson_targets[matched_target_index]
+                        target_id = target.get("id")
 
-                    if (
-                        isinstance(target_id, str)
-                        and is_target_completed_by_transcript(target, event.text)
-                    ):
-                        completed_target_ids.add(target_id)
+                        if isinstance(target_id, str):
+                            completed_target_ids.add(target_id)
+                            current_target_index = min(
+                                max(current_target_index, matched_target_index + 1),
+                                len(lesson_targets) - 1,
+                            )
+                    else:
+                        current_target_index = fallback_target_index
                 has_pending_learner_feedback = True
 
         @agent.events.subscribe

@@ -1,4 +1,5 @@
 import { getSignedInUser, isClerkAuthConfigError } from "@/lib/clerkAuth";
+import { clearActiveVisionAgentSession } from "@/lib/visionAgentSessions";
 
 type StopAgentRequest = {
 	callId?: string;
@@ -81,6 +82,7 @@ export async function POST(request: Request) {
 			);
 		}
 
+		clearActiveVisionAgentSession(body.callId);
 		return new Response(null, { status: 204 });
 	} catch (error) {
 		if (isAbortError(error)) {

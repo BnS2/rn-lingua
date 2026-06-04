@@ -1,12 +1,20 @@
 import { getSignedInUser, isClerkAuthConfigError } from "@/lib/clerkAuth";
+import {
+	clearStartingVisionAgentSession,
+	getActiveVisionAgentSession,
+	getStartingVisionAgentSession,
+	setActiveVisionAgentSession,
+	setStartingVisionAgentSession,
+	type VisionAgentSession,
+} from "@/lib/visionAgentSessions";
+
+const agentServerUrl = process.env.VISION_AGENT_SERVER_URL ?? "http://localhost:8000";
+const agentSharedSecret = process.env.VISION_AGENT_SHARED_SECRET;
 
 type StartAgentRequest = {
 	callId?: string;
 	callType?: "audio_room";
 };
-
-const agentServerUrl = process.env.VISION_AGENT_SERVER_URL ?? "http://localhost:8000";
-const agentSharedSecret = process.env.VISION_AGENT_SHARED_SECRET;
 
 function getAgentRequestTimeoutMs() {
 	const timeoutMs = Number(process.env.VISION_AGENT_REQUEST_TIMEOUT_MS);
@@ -31,6 +39,21 @@ function getAgentHeaders() {
 	}
 
 	return headers;
+}
+
+function isVisionAgentSession(value: unknown): value is VisionAgentSession {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+
+	return (
+		"session_id" in value &&
+		"call_id" in value &&
+		"session_started_at" in value &&
+		typeof value.session_id === "string" &&
+		typeof value.call_id === "string" &&
+		typeof value.session_started_at === "string"
+	);
 }
 
 export async function POST(request: Request) {
@@ -62,30 +85,57 @@ export async function POST(request: Request) {
 		return jsonError("Audio room call context is required.", 400);
 	}
 
+	const activeSession = getActiveVisionAgentSession(body.callId);
+	if (activeSession) {
+		return Response.json(activeSession, { status: 200 });
+	}
+
+	const startingSession = getStartingVisionAgentSession(body.callId);
+	if (startingSession) {
+		try {
+			return Response.json(await startingSession, { status: 200 });
+		} catch {
+			clearStartingVisionAgentSession(body.callId);
+		}
+	}
+
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), agentRequestTimeoutMs);
-
-	try {
-		const response = await fetch(
-			`${agentServerUrl.replace(/\/$/, "")}/calls/${encodeURIComponent(body.callId)}/sessions`,
-			{
-				method: "POST",
-				headers: getAgentHeaders(),
-				body: JSON.stringify({ call_type: body.callType }),
-				signal: controller.signal,
-			},
-		);
-
+	const startSessionPromise = fetch(
+		`${agentServerUrl.replace(/\/$/, "")}/calls/${encodeURIComponent(body.callId)}/sessions`,
+		{
+			method: "POST",
+			headers: getAgentHeaders(),
+			body: JSON.stringify({ call_type: body.callType }),
+			signal: controller.signal,
+		},
+	).then(async (response) => {
 		const responseBody = (await response.json().catch(() => null)) as unknown;
+
 		if (!response.ok) {
-			return Response.json(
+			throw Response.json(
 				{ error: "Unable to start the AI teacher.", details: responseBody },
 				{ status: response.status },
 			);
 		}
 
-		return Response.json(responseBody, { status: 201 });
+		if (!isVisionAgentSession(responseBody)) {
+			throw jsonError("The AI teacher service returned an invalid session.", 502);
+		}
+
+		setActiveVisionAgentSession(body.callId as string, responseBody);
+		return responseBody;
+	});
+
+	setStartingVisionAgentSession(body.callId, startSessionPromise);
+
+	try {
+		return Response.json(await startSessionPromise, { status: 201 });
 	} catch (error) {
+		if (error instanceof Response) {
+			return error;
+		}
+
 		if (isAbortError(error)) {
 			console.error("Vision Agent start timed out:", error);
 			return jsonError(
@@ -97,6 +147,7 @@ export async function POST(request: Request) {
 		console.error("Vision Agent start failed:", error);
 		return jsonError("Unable to reach the AI teacher service.", 502);
 	} finally {
+		clearStartingVisionAgentSession(body.callId);
 		clearTimeout(timeout);
 	}
 }
