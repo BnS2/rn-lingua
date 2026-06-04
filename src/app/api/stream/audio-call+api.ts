@@ -117,11 +117,7 @@ async function createAudioCallSession(
 	signedInUser: NonNullable<Awaited<ReturnType<typeof getSignedInUser>>>,
 	body: StreamAudioCallRequest,
 ) {
-	if (!apiKey || !apiSecret) {
-		throw new Error("Stream API key or secret is not configured.");
-	}
-
-	const stream = createStreamServerClient(apiKey, apiSecret);
+	const stream = createStreamServerClient(apiKey!, apiSecret!);
 	const userName = signedInUser.name || body.userName || "Language learner";
 	const userImage = signedInUser.image ?? body.userImage;
 	const callId = createCallId(signedInUser.id, body.lessonId, body.languageCode);

@@ -45,18 +45,38 @@ LANGUAGE_NAME_BY_CODE = {
 
 class ResilientGeminiRealtime(gemini.Realtime):
     async def simple_audio_response(self, pcm: Any, participant: Any = None) -> None:
-        try:
-            await super().simple_audio_response(pcm, participant)
-        except websockets.ConnectionClosed as error:
-            logger.warning(
-                "Gemini realtime audio websocket closed while sending audio; reconnecting. code=%s reason=%s",
-                getattr(error.rcvd, "code", None),
-                getattr(error.rcvd, "reason", None),
-            )
-            await self.connect()
-        except RuntimeError as error:
-            logger.warning("Gemini realtime audio send failed; reconnecting. error=%s", error)
-            await self.connect()
+        max_retries = 1
+
+        for attempt in range(max_retries + 1):
+            try:
+                await super().simple_audio_response(pcm, participant)
+                return
+            except websockets.ConnectionClosed as error:
+                if attempt >= max_retries:
+                    logger.error(
+                        "Gemini realtime audio websocket closed after retry; dropping audio. code=%s reason=%s",
+                        getattr(error.rcvd, "code", None),
+                        getattr(error.rcvd, "reason", None),
+                    )
+                    return
+
+                logger.warning(
+                    "Gemini realtime audio websocket closed while sending audio; reconnecting. code=%s reason=%s",
+                    getattr(error.rcvd, "code", None),
+                    getattr(error.rcvd, "reason", None),
+                )
+            except RuntimeError as error:
+                if attempt >= max_retries:
+                    logger.error("Gemini realtime audio send failed after retry; dropping audio. error=%s", error)
+                    return
+
+                logger.warning("Gemini realtime audio send failed; reconnecting. error=%s", error)
+
+            try:
+                await self.connect()
+            except Exception:
+                logger.exception("Failed to reconnect Gemini realtime audio after send failure.")
+                return
 
 
 def load_environment() -> None:
@@ -352,6 +372,7 @@ def contains_spoken_token_sequence(normalized_transcript: str, normalized_target
     )
 
 
+def is_target_completed_by_transcript(target: dict[str, Any], transcript: str) -> bool:
     target_terms = [
         target.get("text"),
         target.get("pronunciation"),
@@ -564,6 +585,7 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
         has_finished_required_targets = False
         has_emitted_ready_to_finish = False
         pending_target_emit_reason: Optional[str] = None
+        has_pending_target_emitted = False
         lesson_completed = asyncio.Event()
 
         async def emit_caption_status(
@@ -661,7 +683,7 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
             description="Mark a vocabulary or phrase target item as successfully completed/passed by the learner.",
         )
         async def mark_word_completed(target_id: str) -> dict[str, Any]:
-            nonlocal current_target_index, latest_attempt_passed, pending_target_emit_reason
+            nonlocal current_target_index, has_pending_target_emitted, latest_attempt_passed, pending_target_emit_reason
             logger.info("AI Teacher called mark_word_completed for target_id: %s", target_id)
             if lesson_targets and target_id not in completed_target_ids:
                 completed_target_ids.add(target_id)
@@ -690,7 +712,8 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
                         len(lesson_targets) - 1,
                     )
                     await emit_lesson_target("next")
-                    pending_target_emit_reason = False
+                    pending_target_emit_reason = None
+                    has_pending_target_emitted = True
             return {"status": "success", "target_id": target_id}
 
         async def emit_closed_caption(
@@ -769,12 +792,13 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
         @agent.events.subscribe
         async def on_agent_turn_started(event: AgentTurnStartedEvent) -> None:
-            nonlocal pending_target_emit_reason
+            nonlocal has_pending_target_emitted, pending_target_emit_reason
             # Emit the next word target as the agent starts speaking, not after it
             # finishes — this keeps the word bubble in sync with what is being said.
-            if pending_target_emit_reason is not None:
+            if isinstance(pending_target_emit_reason, str) and not has_pending_target_emitted:
                 reason = pending_target_emit_reason
                 pending_target_emit_reason = None
+                has_pending_target_emitted = True
                 await emit_lesson_target(reason)
             await emit_caption_status("teacher", "started", speaker_id=AGENT_USER.id)
 
@@ -839,7 +863,7 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
         @agent.events.subscribe
         async def on_llm_response_final(event: LLMResponseFinalEvent) -> None:
-            nonlocal current_target_index, has_finished_required_targets, has_pending_learner_feedback, teacher_feedback_count, has_emitted_ready_to_finish, latest_attempt_passed, pending_target_emit_reason, previous_target_index
+            nonlocal current_target_index, has_finished_required_targets, has_pending_learner_feedback, teacher_feedback_count, has_emitted_ready_to_finish, has_pending_target_emitted, latest_attempt_passed, pending_target_emit_reason, previous_target_index
 
             await emit_caption_status(
                 "teacher",
@@ -882,14 +906,16 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
                 )
 
             if not has_finished_required_targets:
-                if pending_target_emit_reason is not False:
+                if has_pending_target_emitted:
+                    pending_target_emit_reason = None
+                    has_pending_target_emitted = False
+                else:
                     pending_target_emit_reason = (
                         "next"
                         if latest_attempt_passed and current_target_index != previous_target_index
                         else "retry"
                     )
-                else:
-                    pending_target_emit_reason = None
+                    has_pending_target_emitted = False
                 latest_attempt_passed = False
                 return
 
