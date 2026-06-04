@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { useRouter } from "expo-router";
-import { useMemo } from "react";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useMemo, useRef } from "react";
 import {
 	Alert,
 	ScrollView,
@@ -49,6 +49,7 @@ function getLessonArtwork(lesson: LearningLesson, status: LessonStatus) {
 
 export default function LearnScreen() {
 	const router = useRouter();
+	const openingLessonIdRef = useRef<string | null>(null);
 	const selectedLanguageCode = useLanguageStore((state) => state.selectedLanguageCode);
 	const activeLanguageCode = selectedLanguageCode ?? "es";
 	const completedLessonIds = useProgressStore(
@@ -94,7 +95,18 @@ export default function LearnScreen() {
 	const activeLesson = lessons[activeLessonIndex] ?? lessons[0];
 	const completedCount = lessons.filter((lesson) => completedLessonIdSet.has(lesson.id)).length;
 
+	useFocusEffect(
+		useCallback(() => {
+			openingLessonIdRef.current = null;
+		}, []),
+	);
+
 	const openLesson = (lessonId: string) => {
+		if (openingLessonIdRef.current) {
+			return;
+		}
+
+		openingLessonIdRef.current = lessonId;
 		router.push({
 			pathname: "/lesson/[lessonId]",
 			params: { lessonId },

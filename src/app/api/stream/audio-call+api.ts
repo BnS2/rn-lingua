@@ -5,6 +5,7 @@ import type { StreamAudioCallRequest, StreamAudioCallSession } from "@/types/str
 const apiKey = process.env.EXPO_PUBLIC_STREAM_API_KEY;
 const apiSecret = process.env.STREAM_API_SECRET;
 const agentUserId = "ai-language-teacher";
+const startingAudioCallSessionsByKey = new Map<string, Promise<StreamAudioCallSession>>();
 
 function jsonError(message: string, status: number) {
 	return Response.json({ error: message }, { status });
@@ -17,6 +18,10 @@ function createCallId(userId: string, lessonId: string, languageCode: string) {
 	const sessionId = Date.now().toString(36);
 
 	return `lesson-${safeLanguageCode}-${safeLessonId}-${safeUserId}-${sessionId}`;
+}
+
+function createAudioCallSessionKey(userId: string, lessonId: string, languageCode: string) {
+	return `${userId}:${languageCode}:${lessonId}`;
 }
 
 function isString(value: unknown): value is string {
@@ -89,7 +94,30 @@ export async function POST(request: Request) {
 		return jsonError("Lesson and language context are required.", 400);
 	}
 
-	const stream = createStreamServerClient(apiKey, apiSecret);
+	const sessionKey = createAudioCallSessionKey(signedInUser.id, body.lessonId, body.languageCode);
+	const startingSession = startingAudioCallSessionsByKey.get(sessionKey);
+
+	if (startingSession) {
+		return Response.json(await startingSession);
+	}
+
+	const sessionPromise = createAudioCallSession(signedInUser, body);
+	startingAudioCallSessionsByKey.set(sessionKey, sessionPromise);
+
+	try {
+		return Response.json(await sessionPromise);
+	} finally {
+		if (startingAudioCallSessionsByKey.get(sessionKey) === sessionPromise) {
+			startingAudioCallSessionsByKey.delete(sessionKey);
+		}
+	}
+}
+
+async function createAudioCallSession(
+	signedInUser: NonNullable<Awaited<ReturnType<typeof getSignedInUser>>>,
+	body: StreamAudioCallRequest,
+) {
+	const stream = createStreamServerClient(apiKey!, apiSecret!);
 	const userName = signedInUser.name || body.userName || "Language learner";
 	const userImage = signedInUser.image ?? body.userImage;
 	const callId = createCallId(signedInUser.id, body.lessonId, body.languageCode);
@@ -192,5 +220,5 @@ export async function POST(request: Request) {
 		languageName: body.languageName,
 	};
 
-	return Response.json(session);
+	return session;
 }
