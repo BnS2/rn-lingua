@@ -3,7 +3,7 @@ name = "duolingo-clone-vision-agent"
 version = "0.1.0"
 description = "Voice-only AI language teacher powered by Vision Agents, Stream Edge, and Gemini Realtime."
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "python-dotenv>=1.1.0",
     "vision-agents[gemini,getstream]>=0.1.0",

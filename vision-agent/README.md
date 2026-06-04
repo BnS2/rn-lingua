@@ -18,6 +18,10 @@ STREAM_API_SECRET=...
 GOOGLE_API_KEY=...
 ```
 
+Use Python 3.12 or 3.13 for the agent environment. Python 3.14 is not supported
+by this service because the realtime audio stack is more stable on the Python
+versions targeted by Vision Agents.
+
 For this Expo app, the service also accepts the existing
 `EXPO_PUBLIC_STREAM_API_KEY` from the parent `.env` and maps it to
 `STREAM_API_KEY` at startup.
@@ -26,6 +30,13 @@ Preferred local run with Varlock:
 
 ```bash
 npx varlock run --path . -- uv run main.py run
+```
+
+If `uv` created the environment with a newer Python, rebuild it from this folder:
+
+```bash
+uv venv --python 3.12
+uv sync
 ```
 
 Preferred HTTP service run with Varlock:

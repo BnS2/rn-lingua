@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import websockets
 from dotenv import dotenv_values
 from fastapi import Header, HTTPException, status
 from vision_agents.core import Agent, AgentLauncher, Runner, ServeOptions, User
@@ -40,6 +41,22 @@ LANGUAGE_NAME_BY_CODE = {
     "fr": "French",
     "ja": "Japanese",
 }
+
+
+class ResilientGeminiRealtime(gemini.Realtime):
+    async def simple_audio_response(self, pcm: Any, participant: Any = None) -> None:
+        try:
+            await super().simple_audio_response(pcm, participant)
+        except websockets.ConnectionClosed as error:
+            logger.warning(
+                "Gemini realtime audio websocket closed while sending audio; reconnecting. code=%s reason=%s",
+                getattr(error.rcvd, "code", None),
+                getattr(error.rcvd, "reason", None),
+            )
+            await self.connect()
+        except RuntimeError as error:
+            logger.warning("Gemini realtime audio send failed; reconnecting. error=%s", error)
+            await self.connect()
 
 
 def load_environment() -> None:
@@ -120,13 +137,15 @@ def format_vocabulary(vocabulary: Any) -> str:
         if not isinstance(item, dict):
             continue
 
+        item_id = item.get("id")
         term = item.get("term")
         translation = item.get("translation")
         pronunciation = item.get("pronunciation")
 
         if isinstance(term, str) and isinstance(translation, str):
             suffix = f"; pronunciation: {pronunciation}" if isinstance(pronunciation, str) else ""
-            lines.append(f"- {term}: {translation}{suffix}")
+            id_suffix = f" [ID: {item_id}]" if isinstance(item_id, str) else ""
+            lines.append(f"- {term}: {translation}{suffix}{id_suffix}")
 
     return "\n".join(lines) or "- Use simple beginner words."
 
@@ -140,6 +159,7 @@ def format_phrases(phrases: Any) -> str:
         if not isinstance(phrase, dict):
             continue
 
+        phrase_id = phrase.get("id")
         text = phrase.get("text")
         translation = phrase.get("translation")
         pronunciation = phrase.get("pronunciation")
@@ -151,7 +171,10 @@ def format_phrases(phrases: Any) -> str:
                 parts.append(f"pronunciation: {pronunciation}")
             if isinstance(context, str):
                 parts.append(f"context: {context}")
-            lines.append("; ".join(parts))
+            line = "; ".join(parts)
+            if isinstance(phrase_id, str):
+                line += f" [ID: {phrase_id}]"
+            lines.append(line)
 
     return "\n".join(lines) or "- Use short phrases from the current lesson."
 
@@ -209,6 +232,112 @@ def normalize_spoken_text(text: str) -> str:
     )
 
 
+def compact_spoken_text(text: str) -> str:
+    return normalize_spoken_text(text).replace(" ", "")
+
+
+def loose_spoken_text(text: str) -> str:
+    return (
+        compact_spoken_text(text)
+        .replace("ah", "a")
+        .replace("oh", "o")
+        .replace("oo", "u")
+        .replace("ee", "i")
+        .replace("chh", "ch")
+    )
+
+
+def spoken_tokens(text: str) -> list[str]:
+    return [token for token in normalize_spoken_text(text).split() if token]
+
+
+def edit_distance_within_limit(left: str, right: str, limit: int) -> int:
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+
+    previous_row = list(range(len(right) + 1))
+
+    for left_index, left_character in enumerate(left):
+        current_row = [left_index + 1]
+        row_minimum = current_row[0]
+
+        for right_index, right_character in enumerate(right):
+            insert_cost = current_row[right_index] + 1
+            delete_cost = previous_row[right_index + 1] + 1
+            replace_cost = previous_row[right_index] + (
+                0 if left_character == right_character else 1
+            )
+            cell_cost = min(insert_cost, delete_cost, replace_cost)
+            current_row.append(cell_cost)
+            row_minimum = min(row_minimum, cell_cost)
+
+        if row_minimum > limit:
+            return limit + 1
+
+        previous_row = current_row
+
+    return previous_row[len(right)]
+
+
+def is_close_spoken_token(spoken_token: str, target_token: str) -> bool:
+    if spoken_token == target_token:
+        return True
+
+    if len(target_token) >= 4 and (
+        spoken_token in target_token or target_token in spoken_token
+    ):
+        return True
+
+    allowed_distance = 1 if len(target_token) <= 4 else min(2, int(len(target_token) * 0.28))
+    return edit_distance_within_limit(spoken_token, target_token, allowed_distance) <= allowed_distance
+
+
+def has_fuzzy_spoken_match(transcript: str, target_term: str) -> bool:
+    transcript_tokens = spoken_tokens(transcript)
+    target_tokens = [token for token in spoken_tokens(target_term) if len(token) > 1]
+
+    if not transcript_tokens or not target_tokens:
+        return False
+
+    if len(target_tokens) == 1:
+        target_token = target_tokens[0]
+        return any(
+            is_close_spoken_token(transcript_token, target_token)
+            for transcript_token in transcript_tokens
+        )
+
+    matched_target_count = sum(
+        1
+        for target_token in target_tokens
+        if any(
+            is_close_spoken_token(transcript_token, target_token)
+            for transcript_token in transcript_tokens
+        )
+    )
+    required_match_count = (
+        len(target_tokens)
+        if len(target_tokens) <= 2
+        else int(len(target_tokens) * 0.75 + 0.999)
+    )
+
+    if matched_target_count >= required_match_count:
+        return True
+
+    transcript_compact = compact_spoken_text(transcript)
+    target_compact = compact_spoken_text(target_term)
+    allowed_distance = min(3, max(1, int(len(target_compact) * 0.2)))
+
+    return (
+        len(target_compact) > 3
+        and edit_distance_within_limit(
+            transcript_compact,
+            target_compact,
+            allowed_distance,
+        )
+        <= allowed_distance
+    )
+
+
 def contains_spoken_token_sequence(normalized_transcript: str, normalized_target: str) -> bool:
     transcript_tokens = normalized_transcript.split()
     target_tokens = normalized_target.split()
@@ -223,13 +352,13 @@ def contains_spoken_token_sequence(normalized_transcript: str, normalized_target
     )
 
 
-def is_target_completed_by_transcript(target: dict[str, Any], transcript: str) -> bool:
     target_terms = [
         target.get("text"),
-        target.get("translation"),
         target.get("pronunciation"),
     ]
     normalized_transcript = normalize_spoken_text(transcript)
+    compact_transcript = compact_spoken_text(transcript)
+    loose_transcript = loose_spoken_text(transcript)
 
     for term in target_terms:
         if not isinstance(term, str):
@@ -239,18 +368,21 @@ def is_target_completed_by_transcript(target: dict[str, Any], transcript: str) -
         if contains_spoken_token_sequence(normalized_transcript, normalized_target):
             return True
 
+        compact_target = compact_spoken_text(term)
+        if compact_target and compact_target in compact_transcript:
+            return True
+
+        loose_target = loose_spoken_text(term)
+        if loose_target and loose_target in loose_transcript:
+            return True
+
+        if has_fuzzy_spoken_match(transcript, term):
+            return True
+
     return False
 
 
-def find_completed_target_index(
-    lesson_targets: list[dict[str, Any]],
-    transcript: str,
-) -> Optional[int]:
-    for index, target in enumerate(lesson_targets):
-        if is_target_completed_by_transcript(target, transcript):
-            return index
 
-    return None
 
 
 def fetch_call_custom_data(call_type: str, call_id: str) -> dict[str, Any]:
@@ -352,6 +484,7 @@ Teaching style:
 - After that wrap-up, stay available if the learner repeats a word, asks to try again, or needs one more correction.
 - Do not tell the learner the call is ending. The app will let them choose when to finish.
 - Keep each turn under 3 sentences unless the learner asks for more detail.
+- You have a tool called `mark_word_completed`. Call `mark_word_completed(target_id)` as soon as the learner makes a successful spoken attempt to repeat, translate, or say the current target item. Only call this tool when the learner's pronunciation and wording match the current target item acceptably. Do not call this tool for your own speech or when the learner fails the attempt.
 
 If the learner asks to switch languages, continue speaking English while teaching the new selected language.
 """.strip()
@@ -382,7 +515,11 @@ async def create_agent(
     )
 
     realtime_model = os.getenv("GEMINI_REALTIME_MODEL")
-    llm = gemini.Realtime(model=realtime_model) if realtime_model else gemini.Realtime()
+    llm = (
+        ResilientGeminiRealtime(model=realtime_model)
+        if realtime_model
+        else ResilientGeminiRealtime()
+    )
 
     return Agent(
         edge=getstream.Edge(),
@@ -418,12 +555,15 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
             len(lesson_targets),
         )
         current_target_index = 0
+        previous_target_index = 0
         learner_attempt_count = 0
         teacher_feedback_count = 0
         completed_target_ids: set[str] = set()
         has_pending_learner_feedback = False
+        latest_attempt_passed = False
         has_finished_required_targets = False
         has_emitted_ready_to_finish = False
+        pending_target_emit_reason: Optional[str] = None
         lesson_completed = asyncio.Event()
 
         async def emit_caption_status(
@@ -481,6 +621,77 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
                 )
             except Exception:
                 logger.exception("Failed to send lesson target event.")
+
+        async def emit_lesson_attempt(
+            target: dict[str, Any],
+            target_index: int,
+            transcript: str,
+            passed: bool,
+            reason: str,
+        ) -> None:
+            target_id = target.get("id")
+
+            if not isinstance(target_id, str):
+                return
+
+            payload = {
+                "kind": "audio_lesson_attempt",
+                "targetItemId": target_id,
+                "targetKind": target.get("kind"),
+                "targetText": target.get("text"),
+                "targetIndex": target_index,
+                "targetCount": len(lesson_targets),
+                "transcript": transcript,
+                "passed": passed,
+                "reason": reason,
+                "sentAt": datetime.now(timezone.utc).isoformat(),
+            }
+
+            try:
+                await asyncio.to_thread(
+                    rest_call.send_call_event,
+                    user_id=AGENT_USER.id,
+                    custom=payload,
+                )
+            except Exception:
+                logger.exception("Failed to send lesson attempt event.")
+
+        @agent.llm.register_function(
+            name="mark_word_completed",
+            description="Mark a vocabulary or phrase target item as successfully completed/passed by the learner.",
+        )
+        async def mark_word_completed(target_id: str) -> dict[str, Any]:
+            nonlocal current_target_index, latest_attempt_passed, pending_target_emit_reason
+            logger.info("AI Teacher called mark_word_completed for target_id: %s", target_id)
+            if lesson_targets and target_id not in completed_target_ids:
+                completed_target_ids.add(target_id)
+                latest_attempt_passed = True
+
+                matched_index = next(
+                    (index for index, target in enumerate(lesson_targets) if target.get("id") == target_id),
+                    -1,
+                )
+
+                if matched_index != -1:
+                    await emit_lesson_attempt(
+                        lesson_targets[matched_index],
+                        matched_index,
+                        "[Recognized by AI Teacher]",
+                        True,
+                        "tool_matched_target",
+                    )
+
+                    current_target_index = next(
+                        (
+                            index
+                            for index, target in enumerate(lesson_targets)
+                            if target.get("id") not in completed_target_ids
+                        ),
+                        len(lesson_targets) - 1,
+                    )
+                    await emit_lesson_target("next")
+                    pending_target_emit_reason = False
+            return {"status": "success", "target_id": target_id}
 
         async def emit_closed_caption(
             speaker: str,
@@ -558,6 +769,13 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
         @agent.events.subscribe
         async def on_agent_turn_started(event: AgentTurnStartedEvent) -> None:
+            nonlocal pending_target_emit_reason
+            # Emit the next word target as the agent starts speaking, not after it
+            # finishes — this keeps the word bubble in sync with what is being said.
+            if pending_target_emit_reason is not None:
+                reason = pending_target_emit_reason
+                pending_target_emit_reason = None
+                await emit_lesson_target(reason)
             await emit_caption_status("teacher", "started", speaker_id=AGENT_USER.id)
 
         @agent.events.subscribe
@@ -578,7 +796,9 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
         @agent.events.subscribe
         async def on_user_transcript(event: UserTranscriptEvent) -> None:
-            nonlocal current_target_index, has_pending_learner_feedback, learner_attempt_count
+            nonlocal current_target_index, has_pending_learner_feedback, learner_attempt_count, latest_attempt_passed, previous_target_index
+
+            previous_target_index = current_target_index
 
             speaker_id = get_participant_user_id(event.participant)
             await emit_caption_status(
@@ -590,24 +810,36 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
             await emit_closed_caption("learner", event.text, speaker_id=speaker_id)
 
             if event.text.strip():
-                logger.info("Learner transcript: %s", event.text.strip())
+                transcript = event.text.strip()
+                logger.info("Learner transcript: %s", transcript)
                 learner_attempt_count += 1
-                if lesson_targets:
-                    fallback_target_index = min(current_target_index, len(lesson_targets) - 1)
-                    matched_target_index = find_completed_target_index(lesson_targets, event.text)
-                    if matched_target_index is not None:
-                        target = lesson_targets[matched_target_index]
-                        target_id = target.get("id")
+                latest_attempt_passed = False
 
-                        if isinstance(target_id, str):
-                            completed_target_ids.add(target_id)
-                    else:
-                        current_target_index = fallback_target_index
+                if lesson_targets:
+                    current_target_index = min(current_target_index, len(lesson_targets) - 1)
+                    current_target = lesson_targets[current_target_index]
+                    latest_attempt_passed = is_target_completed_by_transcript(
+                        current_target,
+                        transcript,
+                    )
+                    target_id = current_target.get("id")
+
+                    if latest_attempt_passed and isinstance(target_id, str):
+                        completed_target_ids.add(target_id)
+
+                    await emit_lesson_attempt(
+                        current_target,
+                        current_target_index,
+                        transcript,
+                        latest_attempt_passed,
+                        "matched_current_target" if latest_attempt_passed else "retry_current_target",
+                    )
+
                 has_pending_learner_feedback = True
 
         @agent.events.subscribe
         async def on_llm_response_final(event: LLMResponseFinalEvent) -> None:
-            nonlocal current_target_index, has_finished_required_targets, has_pending_learner_feedback, teacher_feedback_count, has_emitted_ready_to_finish
+            nonlocal current_target_index, has_finished_required_targets, has_pending_learner_feedback, teacher_feedback_count, has_emitted_ready_to_finish, latest_attempt_passed, pending_target_emit_reason, previous_target_index
 
             await emit_caption_status(
                 "teacher",
@@ -622,7 +854,6 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
 
             teacher_feedback_count += 1
             has_pending_learner_feedback = False
-            previous_target_index = current_target_index
 
             if lesson_targets:
                 target_ids = [
@@ -630,11 +861,12 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
                     for target in lesson_targets
                     if isinstance(target.get("id"), str)
                 ]
+
                 has_finished_required_targets = all(
                     target_id in completed_target_ids for target_id in target_ids
                 )
 
-                if not has_finished_required_targets:
+                if latest_attempt_passed and not has_finished_required_targets:
                     current_target_index = next(
                         (
                             index
@@ -650,9 +882,15 @@ async def join_call(agent: Agent, call_type: str, call_id: str) -> None:
                 )
 
             if not has_finished_required_targets:
-                await emit_lesson_target(
-                    "next" if current_target_index != previous_target_index else "retry"
-                )
+                if pending_target_emit_reason is not False:
+                    pending_target_emit_reason = (
+                        "next"
+                        if latest_attempt_passed and current_target_index != previous_target_index
+                        else "retry"
+                    )
+                else:
+                    pending_target_emit_reason = None
+                latest_attempt_passed = False
                 return
 
             if not has_emitted_ready_to_finish:
