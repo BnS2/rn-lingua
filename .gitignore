@@ -8,6 +8,7 @@ node_modules/
 dist/
 web-build/
 expo-env.d.ts
+env.d.ts
 
 # Native
 .kotlin/
@@ -47,6 +48,9 @@ example
 # prompt
 prompt_material/
 prompts/
+
+# local generated docs
+docs/app-setup/
 
 # antigravity
 .antigravitycli/
